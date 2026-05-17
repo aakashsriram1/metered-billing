@@ -1,6 +1,7 @@
 # Metered Billing Demo Walkthrough
 
-This script lets an evaluator see the core product, ops workflows, and correctness guarantees in about 10 minutes.
+This walkthrough demonstrates the full billing lifecycle: 
+usage ingestion → hourly aggregation → invoice generation → customer visibility → ops corrections → auditability and replay safety.
 
 ## 1. Start The App
 
@@ -17,11 +18,19 @@ docker compose exec backend python manage.py seed_demo_data --reset
 
 The seed command prints demo customers and raw `sk_test_...` API keys. Copy one key.
 
-Open:
+Open the frontend:
 
 ```text
 http://localhost:5173
 ```
+
+Backend API runs at:
+
+```text
+http://localhost:8000
+```
+
+The seeded `sk_test_...` keys are printed once and may change after each reset. Use the latest key printed by the seed command.
 
 ## 2. Customer Dashboard
 
@@ -45,7 +54,7 @@ http://localhost:5173
 dev-ops-token
 ```
 
-3. Click `Save`.
+3. Click `Save`. After saving the token, the customer list should load.
 4. Select `Anomaly Systems` to see the anomaly flag.
 5. In `Billing Inspector`, keep the default current-month range or choose a seeded month.
 6. Click `Load Billing Inspector`.
@@ -112,7 +121,7 @@ Duplicate credit replay:
 2. Submit the same form again with the same idempotency key.
 3. Expected: no second `Credit` row or second negative invoice line item is created.
 
-Payment webhook replay is covered by automated tests:
+Payment webhook signature verification and replay safety are covered by automated tests:
 
 ```bash
 docker compose exec backend python manage.py test billing.tests.PaymentWebhookTests
