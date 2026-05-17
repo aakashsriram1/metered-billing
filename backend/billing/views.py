@@ -1,21 +1,26 @@
 import hashlib
 import hmac
 import json
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Sum
+from django.db.models import Count, Q, Sum
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import exceptions
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .authentication import ApiKeyAuthentication, OpsTokenAuthentication
-from .models import ApiKey, AuditLog, Customer, Invoice, InvoiceLineItem, UsageEvent, UsageWindow, WebhookEvent
+from .models import ApiKey, AuditLog, Customer, Invoice, InvoiceLineItem, JobRun, UsageEvent, UsageWindow, WebhookEvent
 from .serializers import (
+    BillingInspectorAuditLogSerializer,
+    BillingInspectorCreditSerializer,
+    BillingInspectorInvoiceSerializer,
+    BillingInspectorJobRunSerializer,
+    BillingInspectorSerializer,
     CreditSerializer,
     InvoiceDetailSerializer,
     InvoiceListSerializer,
@@ -223,6 +228,130 @@ class OpsCustomerDetailView(OpsScopedMixin, APIView):
         )
         previous_daily_average = previous_30d_total / 30
         return previous_daily_average > 0 and last_24h_total >= previous_daily_average * 10
+
+
+class OpsBillingInspectorView(OpsScopedMixin, APIView):
+    def get(self, request, customer_id):
+        try:
+            customer = Customer.objects.get(id=customer_id)
+        except Customer.DoesNotExist:
+            raise exceptions.NotFound("Customer not found")
+
+        period_start, period_end = self.period_range(request)
+
+        events = UsageEvent.objects.filter(
+            customer=customer,
+            timestamp__gte=period_start,
+            timestamp__lt=period_end,
+        )
+        windows = UsageWindow.objects.filter(
+            customer=customer,
+            window_start__gte=period_start,
+            window_start__lt=period_end,
+        )
+        invoices = customer.invoices.prefetch_related("line_items").filter(
+            period_start=period_start,
+            period_end=period_end,
+        )
+        credits = customer.credits.filter(
+            Q(created_at__gte=period_start, created_at__lt=period_end) | Q(invoice__in=invoices)
+        ).distinct()
+
+        event_count = events.count()
+        event_units = events.aggregate(total=Sum("units"))["total"] or 0
+        window_count = windows.count()
+        window_units = windows.aggregate(total=Sum("total_units"))["total"] or 0
+        invoice_line_items = InvoiceLineItem.objects.filter(invoice__in=invoices)
+        invoice_line_item_units = invoice_line_items.aggregate(total=Sum("units"))["total"] or 0
+
+        data = {
+            "customer": {
+                "id": str(customer.id),
+                "name": customer.name,
+                "email": customer.email,
+            },
+            "period": {
+                "start": period_start.date().isoformat(),
+                "end": period_end.date().isoformat(),
+            },
+            "events": {
+                "count": event_count,
+                "total_units": event_units,
+            },
+            "windows": {
+                "count": window_count,
+                "total_units": window_units,
+            },
+            "invoices": BillingInspectorInvoiceSerializer(invoices, many=True).data,
+            "credits": {
+                "count": credits.count(),
+                "items": BillingInspectorCreditSerializer(credits.order_by("-created_at"), many=True).data,
+            },
+            "overrides": {
+                "count": invoice_line_items.filter(overridden_at__isnull=False).count(),
+            },
+            "audit_logs": BillingInspectorAuditLogSerializer(
+                self.audit_logs_for_customer(customer),
+                many=True,
+            ).data,
+            "job_runs": BillingInspectorJobRunSerializer(JobRun.objects.order_by("-started_at")[:10], many=True).data,
+            "warnings": {
+                "raw_vs_window_mismatch": event_units != window_units,
+                "window_vs_invoice_mismatch": invoices.exists() and window_units != invoice_line_item_units,
+                "late_events_count": self.late_events_count(customer, invoices, period_start, period_end),
+            },
+        }
+        return Response(BillingInspectorSerializer(data).data)
+
+    def period_range(self, request):
+        start_param = request.query_params.get("period_start")
+        end_param = request.query_params.get("period_end")
+
+        if start_param:
+            start_date = parse_date(start_param)
+            if start_date is None:
+                raise exceptions.ValidationError({"period_start": "Expected YYYY-MM-DD."})
+        else:
+            now = timezone.now()
+            start_date = now.replace(day=1).date()
+
+        if end_param:
+            end_date = parse_date(end_param)
+            if end_date is None:
+                raise exceptions.ValidationError({"period_end": "Expected YYYY-MM-DD."})
+        else:
+            end_date = timezone.now().date()
+
+        period_start = timezone.make_aware(datetime.combine(start_date, time.min))
+        period_end = timezone.make_aware(datetime.combine(end_date, time.min))
+        if period_start >= period_end:
+            raise exceptions.ValidationError({"period_end": "Must be after period_start."})
+        return period_start, period_end
+
+    def audit_logs_for_customer(self, customer):
+        invoice_ids = [str(invoice_id) for invoice_id in customer.invoices.values_list("id", flat=True)]
+        line_item_ids = [
+            str(line_item_id)
+            for line_item_id in InvoiceLineItem.objects.filter(invoice__customer=customer).values_list("id", flat=True)
+        ]
+        credit_ids = [str(credit_id) for credit_id in customer.credits.values_list("id", flat=True)]
+        return AuditLog.objects.filter(
+            Q(object_type="Invoice", object_id__in=invoice_ids)
+            | Q(object_type="InvoiceLineItem", object_id__in=line_item_ids)
+            | Q(object_type="Credit", object_id__in=credit_ids)
+            | Q(after_json__customer_id=str(customer.id))
+        ).order_by("-created_at")[:10]
+
+    def late_events_count(self, customer, invoices, period_start, period_end):
+        issued_invoice = invoices.filter(issued_at__isnull=False).order_by("issued_at").first()
+        if issued_invoice is None:
+            return 0
+        return UsageEvent.objects.filter(
+            customer=customer,
+            timestamp__gte=period_start,
+            timestamp__lt=period_end,
+            ingested_at__gt=issued_invoice.issued_at,
+        ).count()
 
 
 class OpsCreditView(OpsScopedMixin, APIView):

@@ -72,3 +72,76 @@ export type OpsCustomerDetail = {
   credits: Credit[];
   anomaly: boolean;
 };
+
+export type BillingInspectorLineItem = {
+  id: string;
+  description: string;
+  units: number;
+  amount_cents: number;
+};
+
+export type BillingInspectorInvoice = {
+  id: string;
+  status: Invoice["status"];
+  total_cents: number;
+  line_items: BillingInspectorLineItem[];
+};
+
+export type BillingInspectorCredit = {
+  id: string;
+  amount_cents: number;
+  reason: string;
+  created_at: string;
+};
+
+export type BillingInspectorAuditLog = {
+  id: string;
+  action: string;
+  actor: string;
+  timestamp: string;
+  reason: string;
+};
+
+export type BillingInspectorJobRun = {
+  id: string;
+  job_name: string;
+  status: "running" | "succeeded" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  metadata: Record<string, unknown>;
+};
+
+export type BillingInspectorResponse = {
+  customer: {
+    id: string;
+    name: string;
+    email: string;
+  };
+  period: {
+    start: string;
+    end: string;
+  };
+  events: {
+    count: number;
+    total_units: number;
+  };
+  windows: {
+    count: number;
+    total_units: number;
+  };
+  invoices: BillingInspectorInvoice[];
+  credits: {
+    count: number;
+    items: BillingInspectorCredit[];
+  };
+  overrides: {
+    count: number;
+  };
+  audit_logs: BillingInspectorAuditLog[];
+  job_runs: BillingInspectorJobRun[];
+  warnings: {
+    raw_vs_window_mismatch: boolean;
+    window_vs_invoice_mismatch: boolean;
+    late_events_count: number;
+  };
+};

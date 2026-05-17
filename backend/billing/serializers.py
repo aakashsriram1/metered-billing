@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Credit, Invoice, InvoiceLineItem, UsageWindow
+from .models import AuditLog, Credit, Invoice, InvoiceLineItem, JobRun, UsageWindow
 
 
 class UsageEventInputSerializer(serializers.Serializer):
@@ -53,3 +53,50 @@ class CreditSerializer(serializers.ModelSerializer):
     class Meta:
         model = Credit
         fields = ("id", "invoice_id", "amount_cents", "reason", "created_by", "idempotency_key", "created_at")
+
+
+class BillingInspectorLineItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InvoiceLineItem
+        fields = ("id", "description", "units", "amount_cents")
+
+
+class BillingInspectorInvoiceSerializer(serializers.ModelSerializer):
+    line_items = BillingInspectorLineItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Invoice
+        fields = ("id", "status", "total_cents", "line_items")
+
+
+class BillingInspectorCreditSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Credit
+        fields = ("id", "amount_cents", "reason", "created_at")
+
+
+class BillingInspectorAuditLogSerializer(serializers.ModelSerializer):
+    timestamp = serializers.DateTimeField(source="created_at")
+
+    class Meta:
+        model = AuditLog
+        fields = ("id", "action", "actor", "timestamp", "reason")
+
+
+class BillingInspectorJobRunSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = JobRun
+        fields = ("id", "job_name", "status", "started_at", "finished_at", "metadata")
+
+
+class BillingInspectorSerializer(serializers.Serializer):
+    customer = serializers.DictField()
+    period = serializers.DictField()
+    events = serializers.DictField()
+    windows = serializers.DictField()
+    invoices = BillingInspectorInvoiceSerializer(many=True)
+    credits = serializers.DictField()
+    overrides = serializers.DictField()
+    audit_logs = BillingInspectorAuditLogSerializer(many=True)
+    job_runs = BillingInspectorJobRunSerializer(many=True)
+    warnings = serializers.DictField()

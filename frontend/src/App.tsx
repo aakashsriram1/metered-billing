@@ -12,6 +12,7 @@ import {
 } from "recharts";
 import { fetchJson, opsFetchJson } from "./api";
 import type {
+  BillingInspectorResponse,
   Invoice,
   InvoiceDetail,
   InvoiceLineItem,
@@ -34,6 +35,16 @@ function currentMonthRange() {
   return {
     start: start.toISOString(),
     end: now.toISOString(),
+  };
+}
+
+function currentMonthDateRange() {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  return {
+    start: start.toISOString().slice(0, 10),
+    end: end.toISOString().slice(0, 10),
   };
 }
 
@@ -279,8 +290,12 @@ function OpsConsole() {
   const [customerDetail, setCustomerDetail] = useState<OpsCustomerDetail | null>(null);
   const [listState, setListState] = useState<LoadState>("idle");
   const [detailState, setDetailState] = useState<LoadState>("idle");
+  const [inspectorState, setInspectorState] = useState<LoadState>("idle");
+  const [inspectorData, setInspectorData] = useState<BillingInspectorResponse | null>(null);
+  const [inspectorError, setInspectorError] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [inspectorRange, setInspectorRange] = useState(() => currentMonthDateRange());
   const [creditForm, setCreditForm] = useState({
     amount_cents: "500",
     reason: "",
@@ -320,11 +335,36 @@ function OpsConsole() {
     try {
       const detail = await opsFetchJson<OpsCustomerDetail>(`/ops/customers/${customerId}`, activeToken);
       setCustomerDetail(detail);
+      setInspectorData(null);
+      setInspectorState("idle");
+      setInspectorError("");
       setDetailState("loaded");
     } catch (err) {
       setCustomerDetail(null);
       setDetailState("error");
       setError(err instanceof Error ? err.message : "Unable to load customer detail.");
+    }
+  }
+
+  async function loadBillingInspector() {
+    if (!customerDetail || !opsToken) return;
+    setInspectorState("loading");
+    setInspectorError("");
+    try {
+      const query = new URLSearchParams({
+        period_start: inspectorRange.start,
+        period_end: inspectorRange.end,
+      });
+      const data = await opsFetchJson<BillingInspectorResponse>(
+        `/ops/customers/${customerDetail.id}/billing-inspector?${query.toString()}`,
+        opsToken,
+      );
+      setInspectorData(data);
+      setInspectorState("loaded");
+    } catch (err) {
+      setInspectorData(null);
+      setInspectorState("error");
+      setInspectorError(err instanceof Error ? err.message : "Unable to load billing inspector.");
     }
   }
 
@@ -358,6 +398,9 @@ function OpsConsole() {
     setSelectedOpsInvoiceId(null);
     setListState("idle");
     setDetailState("idle");
+    setInspectorState("idle");
+    setInspectorData(null);
+    setInspectorError("");
     setMessage("");
     setError("");
   }
@@ -560,6 +603,16 @@ function OpsConsole() {
 
                   <h3>Credits</h3>
                   <CreditsTable credits={customerDetail.credits} />
+
+                  <h3>Billing Inspector</h3>
+                  <BillingInspectorPanel
+                    range={inspectorRange}
+                    data={inspectorData}
+                    state={inspectorState}
+                    error={inspectorError}
+                    onRangeChange={setInspectorRange}
+                    onLoad={loadBillingInspector}
+                  />
                 </div>
               )}
             </Panel>
@@ -961,6 +1014,179 @@ function CreditsTable({ credits }: { credits: OpsCustomerDetail["credits"] }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+function BillingInspectorPanel({
+  range,
+  data,
+  state,
+  error,
+  onRangeChange,
+  onLoad,
+}: {
+  range: { start: string; end: string };
+  data: BillingInspectorResponse | null;
+  state: LoadState;
+  error: string;
+  onRangeChange: (range: { start: string; end: string }) => void;
+  onLoad: () => void;
+}) {
+  const invoiceLineItemCount = data?.invoices.reduce((sum, invoice) => sum + invoice.line_items.length, 0) || 0;
+  const invoiceLineItemCents =
+    data?.invoices.reduce(
+      (invoiceSum, invoice) =>
+        invoiceSum + invoice.line_items.reduce((lineSum, lineItem) => lineSum + lineItem.amount_cents, 0),
+      0,
+    ) || 0;
+  const hasWarnings =
+    Boolean(data?.warnings.raw_vs_window_mismatch) ||
+    Boolean(data?.warnings.window_vs_invoice_mismatch) ||
+    Boolean(data?.warnings.late_events_count);
+
+  return (
+    <div className="billing-inspector">
+      <div className="inspector-controls">
+        <label>
+          Start
+          <input
+            type="date"
+            value={range.start}
+            onChange={(event) => onRangeChange({ ...range, start: event.target.value })}
+          />
+        </label>
+        <label>
+          End
+          <input
+            type="date"
+            value={range.end}
+            onChange={(event) => onRangeChange({ ...range, end: event.target.value })}
+          />
+        </label>
+        <button className="secondary" onClick={onLoad} disabled={state === "loading"}>
+          Load Billing Inspector
+        </button>
+      </div>
+
+      {state === "loading" && <PanelMessage message="Loading billing inspector..." />}
+      {state === "error" && <ErrorState message={error} />}
+
+      {state === "loaded" && data && (
+        <div className="inspector-results">
+          <div className="flow-row">
+            <InspectorStat title="Raw Events" primary={`${data.events.count.toLocaleString()} events`} secondary={`${data.events.total_units.toLocaleString()} units`} />
+            <span className="flow-arrow">→</span>
+            <InspectorStat title="Usage Windows" primary={`${data.windows.count.toLocaleString()} windows`} secondary={`${data.windows.total_units.toLocaleString()} units`} />
+            <span className="flow-arrow">→</span>
+            <InspectorStat title="Invoice Line Items" primary={`${invoiceLineItemCount.toLocaleString()} items`} secondary={money(invoiceLineItemCents)} />
+          </div>
+
+          {hasWarnings && (
+            <div className="warning-block">
+              {data.warnings.raw_vs_window_mismatch && <span className="badge red">Unit mismatch: raw events vs windows</span>}
+              {data.warnings.window_vs_invoice_mismatch && <span className="badge red">Unit mismatch: windows vs invoice</span>}
+              {data.warnings.late_events_count > 0 && (
+                <span className="badge yellow">
+                  {data.warnings.late_events_count.toLocaleString()} late events received after invoice was issued
+                </span>
+              )}
+            </div>
+          )}
+
+          {data.credits.count > 0 && (
+            <div>
+              <h3>Inspector Credits</h3>
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Amount</th>
+                      <th>Reason</th>
+                      <th>Date</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.credits.items.map((credit) => (
+                      <tr key={credit.id}>
+                        <td>{money(credit.amount_cents)}</td>
+                        <td>{credit.reason}</td>
+                        <td>{formatDate(credit.created_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {data.job_runs.length > 0 && (
+            <div>
+              <h3>Recent Jobs</h3>
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Job</th>
+                      <th>Status</th>
+                      <th>Started</th>
+                      <th>Finished</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.job_runs.map((jobRun) => (
+                      <tr key={jobRun.id}>
+                        <td>{jobRun.job_name}</td>
+                        <td><span className={`pill ${jobRun.status}`}>{jobRun.status}</span></td>
+                        <td>{formatDateTime(jobRun.started_at)}</td>
+                        <td>{jobRun.finished_at ? formatDateTime(jobRun.finished_at) : "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {data.audit_logs.length > 0 && (
+            <div>
+              <h3>Recent Audit Logs</h3>
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Action</th>
+                      <th>Actor</th>
+                      <th>Timestamp</th>
+                      <th>Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.audit_logs.map((auditLog) => (
+                      <tr key={auditLog.id}>
+                        <td>{auditLog.action}</td>
+                        <td>{auditLog.actor}</td>
+                        <td>{formatDateTime(auditLog.timestamp)}</td>
+                        <td>{auditLog.reason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InspectorStat({ title, primary, secondary }: { title: string; primary: string; secondary: string }) {
+  return (
+    <section className="inspector-stat">
+      <span>{title}</span>
+      <strong>{primary}</strong>
+      <small>{secondary}</small>
+    </section>
   );
 }
 
