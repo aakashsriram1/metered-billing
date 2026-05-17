@@ -67,3 +67,30 @@ class UsageEvent(models.Model):
 
     def __str__(self):
         return f"{self.request_id} ({self.units} units)"
+
+
+class UsageWindow(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer = models.ForeignKey(Customer, related_name="usage_windows", on_delete=models.CASCADE)
+    api_key = models.ForeignKey(ApiKey, related_name="usage_windows", on_delete=models.CASCADE)
+    window_start = models.DateTimeField()
+    window_end = models.DateTimeField()
+    total_units = models.PositiveIntegerField(default=0)
+    event_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["customer", "api_key", "window_start"],
+                name="unique_usage_window_customer_api_key_hour",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["customer", "window_start"]),
+            models.Index(fields=["api_key", "window_start"]),
+        ]
+
+    def __str__(self):
+        return f"{self.customer} {self.window_start} ({self.total_units} units)"

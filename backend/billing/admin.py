@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import ApiKey, Customer, UsageEvent
+from .models import ApiKey, Customer, UsageEvent, UsageWindow
 
 
 @admin.register(Customer)
@@ -24,3 +24,11 @@ class UsageEventAdmin(admin.ModelAdmin):
     list_filter = ("endpoint", "timestamp", "ingested_at")
     search_fields = ("request_id", "customer__name", "customer__email", "api_key__key_prefix")
     readonly_fields = ("id", "ingested_at")
+
+
+@admin.register(UsageWindow)
+class UsageWindowAdmin(admin.ModelAdmin):
+    list_display = ("customer", "api_key", "window_start", "window_end", "total_units", "event_count")
+    list_filter = ("window_start", "window_end")
+    search_fields = ("customer__name", "customer__email", "api_key__key_prefix")
+    readonly_fields = ("id", "created_at", "updated_at")
