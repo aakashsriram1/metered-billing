@@ -1,8 +1,11 @@
 import hashlib
 import hmac
+import io
 import json
 from datetime import datetime, timedelta, timezone as datetime_timezone
 
+from django.core.management import call_command
+from django.db.models import Sum
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
@@ -616,3 +619,55 @@ class PaymentWebhookTests(APITestCase):
         self.assertEqual(audit.before_json["status"], Invoice.STATUS_ISSUED)
         self.assertEqual(audit.after_json["status"], Invoice.STATUS_PAID)
         self.assertEqual(audit.after_json["provider_event_id"], "evt_audit")
+
+
+class SeedDemoDataTests(APITestCase):
+    def seed(self):
+        out = io.StringIO()
+        call_command("seed_demo_data", reset=True, stdout=out)
+        return out.getvalue()
+
+    def test_command_creates_customers(self):
+        self.seed()
+
+        self.assertGreaterEqual(Customer.objects.count(), 5)
+        self.assertTrue(Customer.objects.filter(name="Anomaly Systems").exists())
+
+    def test_command_creates_api_keys(self):
+        output = self.seed()
+
+        self.assertGreaterEqual(ApiKey.objects.count(), Customer.objects.count())
+        self.assertIn("sk_test_demo_", output)
+
+    def test_command_creates_usage_events_and_windows(self):
+        self.seed()
+
+        self.assertGreater(UsageEvent.objects.count(), 0)
+        self.assertGreater(UsageWindow.objects.count(), 0)
+
+    def test_command_creates_invoices(self):
+        self.seed()
+
+        self.assertGreater(Invoice.objects.count(), 0)
+        self.assertTrue(Invoice.objects.filter(status=Invoice.STATUS_ISSUED).exists())
+
+    def test_anomaly_customer_exists(self):
+        self.seed()
+
+        customer = Customer.objects.get(name="Anomaly Systems")
+        now = timezone.now()
+        last_24h_total = (
+            UsageWindow.objects.filter(customer=customer, window_start__gte=now - timedelta(hours=24))
+            .aggregate(total=Sum("total_units"))["total"]
+            or 0
+        )
+        previous_30d_total = (
+            UsageWindow.objects.filter(
+                customer=customer,
+                window_start__gte=now - timedelta(days=31),
+                window_start__lt=now - timedelta(hours=24),
+            ).aggregate(total=Sum("total_units"))["total"]
+            or 0
+        )
+        self.assertGreater(previous_30d_total, 0)
+        self.assertGreaterEqual(last_24h_total, (previous_30d_total / 30) * 10)
