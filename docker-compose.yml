@@ -25,6 +25,7 @@ services:
       DB_PASSWORD: metered_password
       DB_HOST: db
       DB_PORT: "5432"
+      PAYMENT_WEBHOOK_SECRET: dev-payment-secret
     depends_on:
       - db
 

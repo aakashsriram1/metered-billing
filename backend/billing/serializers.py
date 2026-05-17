@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Invoice, InvoiceLineItem, UsageWindow
+from .models import Credit, Invoice, InvoiceLineItem, UsageWindow
 
 
 class UsageEventInputSerializer(serializers.Serializer):
@@ -45,3 +45,11 @@ class InvoiceDetailSerializer(InvoiceListSerializer):
 
     class Meta(InvoiceListSerializer.Meta):
         fields = InvoiceListSerializer.Meta.fields + ("line_items",)
+
+
+class CreditSerializer(serializers.ModelSerializer):
+    invoice_id = serializers.UUIDField(read_only=True)
+
+    class Meta:
+        model = Credit
+        fields = ("id", "invoice_id", "amount_cents", "reason", "created_by", "idempotency_key", "created_at")

@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import ApiKey, Customer, Invoice, InvoiceLineItem, PricePlan, UsageEvent, UsageWindow
+from .models import ApiKey, AuditLog, Credit, Customer, Invoice, InvoiceLineItem, PricePlan, UsageEvent, UsageWindow, WebhookEvent
 
 
 @admin.register(PricePlan)
@@ -60,3 +60,33 @@ class InvoiceLineItemAdmin(admin.ModelAdmin):
     list_display = ("invoice", "description", "units", "unit_price_micros", "amount_cents")
     search_fields = ("description", "invoice__customer__name", "invoice__customer__email")
     readonly_fields = ("id", "created_at", "updated_at")
+
+
+@admin.register(Credit)
+class CreditAdmin(admin.ModelAdmin):
+    list_display = ("customer", "invoice", "amount_cents", "created_by", "idempotency_key", "created_at")
+    search_fields = ("customer__name", "customer__email", "reason", "idempotency_key")
+    readonly_fields = ("id", "created_at")
+
+
+@admin.register(AuditLog)
+class AuditLogAdmin(admin.ModelAdmin):
+    list_display = ("actor", "action", "object_type", "object_id", "created_at")
+    search_fields = ("actor", "action", "object_type", "object_id", "reason")
+    readonly_fields = ("id", "actor", "action", "object_type", "object_id", "before_json", "after_json", "reason", "created_at")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(WebhookEvent)
+class WebhookEventAdmin(admin.ModelAdmin):
+    list_display = ("provider_event_id", "event_type", "processed_at", "created_at")
+    search_fields = ("provider_event_id", "event_type", "payload_hash")
+    readonly_fields = ("id", "provider_event_id", "event_type", "payload_hash", "processed_at", "created_at")

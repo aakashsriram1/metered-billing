@@ -164,8 +164,82 @@ class InvoiceLineItem(models.Model):
     unit_price_micros = models.IntegerField()
     amount_cents = models.IntegerField()
     metadata = models.JSONField(default=dict)
+    overridden_at = models.DateTimeField(null=True, blank=True)
+    override_reason = models.TextField(blank=True)
+    overridden_by = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"{self.description}: {self.amount_cents} cents"
+
+
+class Credit(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer = models.ForeignKey(Customer, related_name="credits", on_delete=models.CASCADE)
+    invoice = models.ForeignKey(Invoice, related_name="credits", on_delete=models.CASCADE, null=True, blank=True)
+    amount_cents = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    reason = models.TextField()
+    created_by = models.CharField(max_length=255)
+    idempotency_key = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["customer", "idempotency_key"],
+                name="unique_credit_customer_idempotency_key",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["customer", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.customer} credit {self.amount_cents} cents"
+
+
+class AuditLog(models.Model):
+    """Append-only audit row for money-moving ops actions."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor = models.CharField(max_length=255)
+    action = models.CharField(max_length=255)
+    object_type = models.CharField(max_length=255)
+    object_id = models.CharField(max_length=255)
+    before_json = models.JSONField(default=dict)
+    after_json = models.JSONField(default=dict)
+    reason = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "audit log"
+        verbose_name_plural = "audit logs"
+
+    def save(self, *args, **kwargs):
+        if self.pk and AuditLog.objects.filter(pk=self.pk).exists():
+            raise ValueError("AuditLog rows are append-only and cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError("AuditLog rows are append-only and cannot be deleted.")
+
+    def __str__(self):
+        return f"{self.action} by {self.actor} at {self.created_at}"
+
+
+class WebhookEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    provider_event_id = models.CharField(max_length=255, unique=True)
+    event_type = models.CharField(max_length=255)
+    payload_hash = models.CharField(max_length=64)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.provider_event_id} ({self.event_type})"

@@ -2,7 +2,7 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
-from .models import Customer, Invoice, InvoiceLineItem, PricePlan, UsageWindow
+from .models import AuditLog, Credit, Customer, Invoice, InvoiceLineItem, PricePlan, UsageWindow
 
 
 def micros_to_cents(units: int, price_micros: int) -> int:
@@ -94,3 +94,79 @@ def generate_invoices(period_start, period_end):
     for customer in Customer.objects.all().select_related("price_plan"):
         invoices.append(generate_invoice_for_customer(customer, period_start, period_end))
     return invoices
+
+
+def recompute_invoice_total(invoice: Invoice):
+    invoice.total_cents = invoice.line_items.aggregate(total=Sum("amount_cents"))["total"] or 0
+    invoice.save(update_fields=["total_cents", "updated_at"])
+    return invoice
+
+
+def issue_credit(customer: Customer, amount_cents: int, reason: str, idempotency_key: str, actor: str, invoice=None):
+    with transaction.atomic():
+        credit, created = Credit.objects.get_or_create(
+            customer=customer,
+            idempotency_key=idempotency_key,
+            defaults={
+                "invoice": invoice,
+                "amount_cents": amount_cents,
+                "reason": reason,
+                "created_by": actor,
+            },
+        )
+        if created:
+            AuditLog.objects.create(
+                actor=actor,
+                action="credit.create",
+                object_type="Credit",
+                object_id=str(credit.id),
+                before_json={},
+                after_json={
+                    "customer_id": str(customer.id),
+                    "invoice_id": str(invoice.id) if invoice else None,
+                    "amount_cents": amount_cents,
+                    "reason": reason,
+                    "idempotency_key": idempotency_key,
+                },
+                reason=reason,
+            )
+        return credit, created
+
+
+def override_invoice_line_item(invoice_id, line_item_id, amount_cents: int, reason: str, actor: str):
+    with transaction.atomic():
+        line_item = (
+            InvoiceLineItem.objects.select_for_update()
+            .select_related("invoice")
+            .get(id=line_item_id, invoice_id=invoice_id)
+        )
+        before = {
+            "amount_cents": line_item.amount_cents,
+            "override_reason": line_item.override_reason,
+            "overridden_by": line_item.overridden_by,
+            "overridden_at": line_item.overridden_at.isoformat() if line_item.overridden_at else None,
+        }
+
+        line_item.amount_cents = amount_cents
+        line_item.override_reason = reason
+        line_item.overridden_by = actor
+        line_item.overridden_at = timezone.now()
+        line_item.save(update_fields=["amount_cents", "override_reason", "overridden_by", "overridden_at", "updated_at"])
+
+        invoice = recompute_invoice_total(line_item.invoice)
+        AuditLog.objects.create(
+            actor=actor,
+            action="invoice_line_item.override",
+            object_type="InvoiceLineItem",
+            object_id=str(line_item.id),
+            before_json=before,
+            after_json={
+                "amount_cents": line_item.amount_cents,
+                "override_reason": line_item.override_reason,
+                "overridden_by": line_item.overridden_by,
+                "overridden_at": line_item.overridden_at.isoformat(),
+                "invoice_total_cents": invoice.total_cents,
+            },
+            reason=reason,
+        )
+        return line_item

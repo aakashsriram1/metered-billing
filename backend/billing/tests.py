@@ -1,10 +1,14 @@
+import hashlib
+import hmac
+import json
 from datetime import datetime, timedelta, timezone as datetime_timezone
 
+from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from .management.commands.aggregate_usage import Command as AggregateUsageCommand
-from .models import ApiKey, Customer, Invoice, PricePlan, UsageEvent, UsageWindow
+from .models import ApiKey, AuditLog, Credit, Customer, Invoice, PricePlan, UsageEvent, UsageWindow, WebhookEvent
 from .services import calculate_tiered_amount_cents, generate_invoice_for_customer
 
 
@@ -369,3 +373,246 @@ class BillingTests(APITestCase):
         response = self.client.get(f"/v1/invoices/{invoice.id}")
 
         self.assertEqual(response.status_code, 404)
+
+
+class OpsTests(APITestCase):
+    def setUp(self):
+        self.price_plan = PricePlan.objects.create(name="Ops Default")
+        self.customer = Customer.objects.create(
+            name="Alpha Ops",
+            email="alpha-ops@example.com",
+            price_plan=self.price_plan,
+        )
+        self.api_key, _ = ApiKey.create_key(self.customer, "Alpha ops key")
+        self.period_start = datetime(2026, 5, 1, 0, 0, tzinfo=datetime_timezone.utc)
+        self.period_end = datetime(2026, 6, 1, 0, 0, tzinfo=datetime_timezone.utc)
+        self.window = UsageWindow.objects.create(
+            customer=self.customer,
+            api_key=self.api_key,
+            window_start=datetime(2026, 5, 16, 18, 0, tzinfo=datetime_timezone.utc),
+            window_end=datetime(2026, 5, 16, 19, 0, tzinfo=datetime_timezone.utc),
+            total_units=20_000,
+            event_count=5,
+        )
+        self.invoice = generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
+
+    def test_ops_can_list_customers(self):
+        response = self.client.get("/ops/customers")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["name"], "Alpha Ops")
+        self.assertEqual(response.data["results"][0]["invoice_count"], 1)
+
+    def test_ops_can_retrieve_customer_detail(self):
+        response = self.client.get(f"/ops/customers/{self.customer.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["id"], str(self.customer.id))
+        self.assertIn("recent_usage_windows", response.data)
+        self.assertIn("invoices", response.data)
+        self.assertIn("credits", response.data)
+        self.assertIn("anomaly", response.data)
+
+    def test_credit_creates_credit_and_audit_log(self):
+        response = self.client.post(
+            f"/ops/customers/{self.customer.id}/credits",
+            {
+                "amount_cents": 500,
+                "reason": "Goodwill credit",
+                "idempotency_key": "credit_123",
+            },
+            format="json",
+            HTTP_X_OPS_ACTOR="ops-user@example.com",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Credit.objects.count(), 1)
+        self.assertEqual(AuditLog.objects.count(), 1)
+        audit = AuditLog.objects.get()
+        self.assertEqual(audit.actor, "ops-user@example.com")
+        self.assertEqual(audit.action, "credit.create")
+        self.assertEqual(audit.after_json["amount_cents"], 500)
+
+    def test_duplicate_credit_idempotency_key_does_not_double_credit(self):
+        payload = {
+            "amount_cents": 500,
+            "reason": "Goodwill credit",
+            "idempotency_key": "credit_123",
+        }
+
+        first = self.client.post(f"/ops/customers/{self.customer.id}/credits", payload, format="json")
+        second = self.client.post(f"/ops/customers/{self.customer.id}/credits", payload, format="json")
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(Credit.objects.count(), 1)
+        self.assertEqual(AuditLog.objects.count(), 1)
+        self.assertFalse(second.data["created"])
+
+    def test_line_item_override_updates_amount(self):
+        line_item = self.invoice.line_items.order_by("-amount_cents").first()
+
+        response = self.client.patch(
+            f"/ops/invoices/{self.invoice.id}/line-items/{line_item.id}",
+            {
+                "amount_cents": 2500,
+                "reason": "Corrected usage dispute",
+            },
+            format="json",
+            HTTP_X_OPS_ACTOR="ops-user@example.com",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        line_item.refresh_from_db()
+        self.assertEqual(line_item.amount_cents, 2500)
+        self.assertEqual(line_item.override_reason, "Corrected usage dispute")
+        self.assertEqual(line_item.overridden_by, "ops-user@example.com")
+
+    def test_line_item_override_creates_audit_log_with_before_after(self):
+        line_item = self.invoice.line_items.order_by("-amount_cents").first()
+        original_amount = line_item.amount_cents
+
+        self.client.patch(
+            f"/ops/invoices/{self.invoice.id}/line-items/{line_item.id}",
+            {
+                "amount_cents": 2500,
+                "reason": "Corrected usage dispute",
+            },
+            format="json",
+        )
+
+        audit = AuditLog.objects.get(action="invoice_line_item.override")
+        self.assertEqual(audit.before_json["amount_cents"], original_amount)
+        self.assertEqual(audit.after_json["amount_cents"], 2500)
+        self.assertEqual(audit.reason, "Corrected usage dispute")
+
+    def test_override_requires_reason(self):
+        line_item = self.invoice.line_items.order_by("-amount_cents").first()
+
+        response = self.client.patch(
+            f"/ops/invoices/{self.invoice.id}/line-items/{line_item.id}",
+            {"amount_cents": 2500},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_invoice_total_is_recomputed_after_override(self):
+        line_item = self.invoice.line_items.order_by("-amount_cents").first()
+
+        self.client.patch(
+            f"/ops/invoices/{self.invoice.id}/line-items/{line_item.id}",
+            {
+                "amount_cents": 2500,
+                "reason": "Corrected usage dispute",
+            },
+            format="json",
+        )
+
+        self.invoice.refresh_from_db()
+        self.assertEqual(
+            self.invoice.total_cents,
+            sum(item.amount_cents for item in self.invoice.line_items.all()),
+        )
+
+
+@override_settings(PAYMENT_WEBHOOK_SECRET="test-payment-secret")
+class PaymentWebhookTests(APITestCase):
+    def setUp(self):
+        self.price_plan = PricePlan.objects.create(name="Webhook Default")
+        self.customer = Customer.objects.create(
+            name="Alpha Webhook",
+            email="alpha-webhook@example.com",
+            price_plan=self.price_plan,
+        )
+        self.api_key, _ = ApiKey.create_key(self.customer, "Alpha webhook key")
+        period_start = datetime(2026, 5, 1, 0, 0, tzinfo=datetime_timezone.utc)
+        period_end = datetime(2026, 6, 1, 0, 0, tzinfo=datetime_timezone.utc)
+        UsageWindow.objects.create(
+            customer=self.customer,
+            api_key=self.api_key,
+            window_start=datetime(2026, 5, 16, 18, 0, tzinfo=datetime_timezone.utc),
+            window_end=datetime(2026, 5, 16, 19, 0, tzinfo=datetime_timezone.utc),
+            total_units=20_000,
+            event_count=5,
+        )
+        self.invoice = generate_invoice_for_customer(self.customer, period_start, period_end)
+
+    def raw_payload(self, invoice=None):
+        payload = {
+            "type": "invoice.paid",
+            "invoice_id": str((invoice or self.invoice).id),
+            "paid_at": "2026-05-16T18:00:00Z",
+        }
+        return json.dumps(payload).encode("utf-8")
+
+    def signature(self, raw_body):
+        return hmac.new(b"test-payment-secret", raw_body, hashlib.sha256).hexdigest()
+
+    def post_webhook(self, provider_event_id="evt_123", raw_body=None, signature=None):
+        raw_body = raw_body or self.raw_payload()
+        signature = signature if signature is not None else self.signature(raw_body)
+        return self.client.post(
+            "/webhooks/payments",
+            data=raw_body,
+            content_type="application/json",
+            HTTP_X_PAYMENT_EVENT_ID=provider_event_id,
+            HTTP_X_PAYMENT_SIGNATURE=signature,
+        )
+
+    def test_valid_signature_marks_invoice_paid(self):
+        response = self.post_webhook()
+
+        self.assertEqual(response.status_code, 200)
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, Invoice.STATUS_PAID)
+        self.assertIsNotNone(self.invoice.paid_at)
+        self.assertEqual(WebhookEvent.objects.count(), 1)
+
+    def test_missing_signature_returns_401(self):
+        response = self.post_webhook(signature="")
+
+        self.assertEqual(response.status_code, 401)
+        self.invoice.refresh_from_db()
+        self.assertNotEqual(self.invoice.status, Invoice.STATUS_PAID)
+
+    def test_invalid_signature_returns_401(self):
+        response = self.post_webhook(signature="not-valid")
+
+        self.assertEqual(response.status_code, 401)
+        self.invoice.refresh_from_db()
+        self.assertNotEqual(self.invoice.status, Invoice.STATUS_PAID)
+
+    def test_same_provider_event_id_replay_does_not_double_apply(self):
+        first = self.post_webhook(provider_event_id="evt_replay")
+        second = self.post_webhook(provider_event_id="evt_replay")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertFalse(first.data["replay"])
+        self.assertTrue(second.data["replay"])
+        self.assertEqual(WebhookEvent.objects.count(), 1)
+        self.assertEqual(AuditLog.objects.filter(action="invoice.paid").count(), 1)
+
+    def test_webhook_for_already_paid_invoice_is_safe(self):
+        self.invoice.status = Invoice.STATUS_PAID
+        self.invoice.paid_at = timezone.now()
+        self.invoice.save(update_fields=["status", "paid_at", "updated_at"])
+
+        response = self.post_webhook(provider_event_id="evt_already_paid")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["processed"])
+        self.assertEqual(AuditLog.objects.filter(action="invoice.paid").count(), 0)
+        self.assertEqual(WebhookEvent.objects.count(), 1)
+
+    def test_audit_log_created_when_invoice_is_marked_paid(self):
+        self.post_webhook(provider_event_id="evt_audit")
+
+        audit = AuditLog.objects.get(action="invoice.paid")
+        self.assertEqual(audit.actor, "payment-webhook")
+        self.assertEqual(audit.object_id, str(self.invoice.id))
+        self.assertEqual(audit.before_json["status"], Invoice.STATUS_ISSUED)
+        self.assertEqual(audit.after_json["status"], Invoice.STATUS_PAID)
+        self.assertEqual(audit.after_json["provider_event_id"], "evt_audit")
