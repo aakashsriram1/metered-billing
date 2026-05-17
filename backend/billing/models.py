@@ -1,3 +1,69 @@
+import hashlib
+import secrets
+import uuid
+
+from django.core.validators import MinValueValidator
 from django.db import models
 
-# Create your models here.
+
+def hash_api_key(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+class Customer(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    email = models.EmailField(unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.name} <{self.email}>"
+
+    @property
+    def is_authenticated(self):
+        return True
+
+
+class ApiKey(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer = models.ForeignKey(Customer, related_name="api_keys", on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    key_prefix = models.CharField(max_length=16, db_index=True)
+    key_hash = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    @classmethod
+    def create_key(cls, customer: Customer, name: str):
+        raw_key = f"sk_test_{secrets.token_urlsafe(32)}"
+        api_key = cls.objects.create(
+            customer=customer,
+            name=name,
+            key_prefix=raw_key[:16],
+            key_hash=hash_api_key(raw_key),
+        )
+        return api_key, raw_key
+
+    def __str__(self):
+        return f"{self.name} ({self.key_prefix}...)"
+
+
+class UsageEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request_id = models.CharField(max_length=255, unique=True)
+    customer = models.ForeignKey(Customer, related_name="usage_events", on_delete=models.CASCADE)
+    api_key = models.ForeignKey(ApiKey, related_name="usage_events", on_delete=models.CASCADE)
+    endpoint = models.CharField(max_length=255)
+    units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    timestamp = models.DateTimeField()
+    ingested_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["customer", "timestamp"]),
+            models.Index(fields=["api_key", "timestamp"]),
+        ]
+
+    def __str__(self):
+        return f"{self.request_id} ({self.units} units)"
