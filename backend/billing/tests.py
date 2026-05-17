@@ -3,6 +3,7 @@ import hmac
 import io
 import json
 from datetime import datetime, timedelta, timezone as datetime_timezone
+from unittest.mock import patch
 
 from django.conf import settings
 from django.core.management import call_command
@@ -718,6 +719,92 @@ class JobRunTests(APITestCase):
         job = JobRun.objects.get(lock_key="aggregate_usage")
         self.assertEqual(job.status, JobRun.STATUS_SUCCEEDED)
         self.assertIsNotNone(job.finished_at)
+
+
+class RunWorkerTests(APITestCase):
+    def setUp(self):
+        self.now = datetime(2026, 5, 17, 12, 0, tzinfo=datetime_timezone.utc)
+        self.customer = Customer.objects.create(name="Worker Alpha", email="worker-alpha@example.com")
+        self.api_key, _ = ApiKey.create_key(self.customer, "Worker key")
+
+    def run_worker_once(self, now=None):
+        out = io.StringIO()
+        with patch("billing.management.commands.run_worker.timezone.now", return_value=now or self.now):
+            call_command("run_worker", once=True, stdout=out)
+        return out.getvalue()
+
+    def test_run_worker_once_exits_after_one_tick(self):
+        output = self.run_worker_once()
+
+        self.assertIn("worker tick started", output)
+        self.assertIn("run_worker --once complete", output)
+
+    def test_existing_running_lock_causes_skip(self):
+        UsageEvent.objects.create(
+            request_id="worker-lock-req",
+            customer=self.customer,
+            api_key=self.api_key,
+            endpoint="/v1/chat",
+            units=42,
+            timestamp=self.now - timedelta(hours=1),
+        )
+        JobRun.objects.create(
+            job_name="aggregate_usage",
+            lock_key="aggregate_usage",
+            status=JobRun.STATUS_RUNNING,
+            started_at=self.now - timedelta(minutes=5),
+        )
+
+        output = self.run_worker_once()
+
+        self.assertIn("aggregate_usage is already running; skipped.", output)
+        self.assertEqual(UsageWindow.objects.count(), 0)
+        self.assertEqual(JobRun.objects.get(lock_key="aggregate_usage").status, JobRun.STATUS_RUNNING)
+
+    def test_successful_run_marks_aggregate_job_succeeded(self):
+        UsageEvent.objects.create(
+            request_id="worker-success-req",
+            customer=self.customer,
+            api_key=self.api_key,
+            endpoint="/v1/chat",
+            units=42,
+            timestamp=self.now - timedelta(hours=1),
+        )
+
+        self.run_worker_once()
+
+        job = JobRun.objects.get(lock_key="aggregate_usage")
+        self.assertEqual(job.status, JobRun.STATUS_SUCCEEDED)
+        self.assertEqual(job.metadata["window_count"], 1)
+        self.assertEqual(UsageWindow.objects.count(), 1)
+
+    def test_first_day_generates_previous_month_invoices(self):
+        price_plan = PricePlan.objects.create(name="Worker Default")
+        self.customer.price_plan = price_plan
+        self.customer.save(update_fields=["price_plan", "updated_at"])
+        may_start = datetime(2026, 5, 1, 0, 0, tzinfo=datetime_timezone.utc)
+        june_start = datetime(2026, 6, 1, 0, 0, tzinfo=datetime_timezone.utc)
+        UsageWindow.objects.create(
+            customer=self.customer,
+            api_key=self.api_key,
+            window_start=datetime(2026, 5, 16, 18, 0, tzinfo=datetime_timezone.utc),
+            window_end=datetime(2026, 5, 16, 19, 0, tzinfo=datetime_timezone.utc),
+            total_units=20_000,
+            event_count=5,
+        )
+
+        output = self.run_worker_once(datetime(2026, 6, 1, 12, 0, tzinfo=datetime_timezone.utc))
+
+        invoice = Invoice.objects.get(customer=self.customer, period_start=may_start, period_end=june_start)
+        self.assertIn("First day of month; running generate_invoices", output)
+        self.assertEqual(invoice.status, Invoice.STATUS_ISSUED)
+        self.assertEqual(invoice.total_cents, 1_000)
+        self.assertEqual(
+            JobRun.objects.get(
+                lock_key=f"generate_invoices:{may_start.isoformat()}:{june_start.isoformat()}"
+            ).status,
+            JobRun.STATUS_SUCCEEDED,
+        )
 
 
 @override_settings(PAYMENT_WEBHOOK_SECRET="test-payment-secret")
