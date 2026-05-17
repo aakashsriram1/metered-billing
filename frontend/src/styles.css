@@ -59,6 +59,20 @@ button.danger-button {
   padding: 4px 0;
 }
 
+.copy-button,
+.compact-button {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.copy-button {
+  margin-left: 6px;
+  background: white;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+
 .app-shell {
   max-width: 1240px;
   margin: 0 auto;
@@ -340,6 +354,12 @@ th:nth-child(4) {
   margin-bottom: 14px;
 }
 
+.form-note {
+  color: #475569;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+
 .ops-grid {
   display: grid;
   grid-template-columns: 1.05fr 0.95fr;
@@ -354,6 +374,28 @@ th:nth-child(4) {
 
 .selected-row td {
   background: #eff6ff;
+}
+
+.line-items-row td {
+  background: #f8fafc;
+  border-bottom-color: #dbe3ee;
+  padding: 12px;
+}
+
+.nested-table {
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  overflow: hidden;
+  background: white;
+}
+
+.nested-table table {
+  font-size: 13px;
+}
+
+.nested-table th,
+.nested-table td {
+  padding: 9px 8px;
 }
 
 .ops-detail {

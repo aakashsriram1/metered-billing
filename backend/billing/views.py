@@ -190,7 +190,7 @@ class OpsCustomerDetailView(OpsScopedMixin, APIView):
             raise exceptions.NotFound("Customer not found")
 
         recent_usage = customer.usage_windows.order_by("-window_start")[:24]
-        invoices = customer.invoices.order_by("-period_start")
+        invoices = customer.invoices.prefetch_related("line_items").order_by("-period_start")
         credits = customer.credits.order_by("-created_at")
 
         return Response(
@@ -200,7 +200,7 @@ class OpsCustomerDetailView(OpsScopedMixin, APIView):
                 "email": customer.email,
                 "created_at": customer.created_at,
                 "recent_usage_windows": UsageWindowSerializer(recent_usage, many=True).data,
-                "invoices": InvoiceListSerializer(invoices, many=True).data,
+                "invoices": InvoiceDetailSerializer(invoices, many=True).data,
                 "credits": CreditSerializer(credits, many=True).data,
                 "anomaly": self.has_usage_anomaly(customer),
             }

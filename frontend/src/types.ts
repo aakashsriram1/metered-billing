@@ -38,6 +38,10 @@ export type InvoiceDetail = Invoice & {
   line_items: InvoiceLineItem[];
 };
 
+export type OpsInvoice = Invoice & {
+  line_items?: InvoiceLineItem[];
+};
+
 export type Credit = {
   id: string;
   invoice_id: string | null;
@@ -64,7 +68,7 @@ export type OpsCustomerDetail = {
   email: string;
   created_at: string;
   recent_usage_windows: UsageWindow[];
-  invoices: Invoice[];
+  invoices: OpsInvoice[];
   credits: Credit[];
   anomaly: boolean;
 };

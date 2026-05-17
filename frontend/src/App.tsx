@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { AlertCircle, CheckCircle2, FileText, KeyRound, RefreshCw, ShieldCheck } from "lucide-react";
 import {
@@ -14,8 +14,10 @@ import { fetchJson, opsFetchJson } from "./api";
 import type {
   Invoice,
   InvoiceDetail,
+  InvoiceLineItem,
   OpsCustomerDetail,
   OpsCustomerSummary,
+  OpsInvoice,
   UsageResponse,
   UsageWindow,
 } from "./types";
@@ -67,6 +69,10 @@ function unitPrice(micros: number) {
 
 function shortId(id: string) {
   return `${id.slice(0, 8)}...`;
+}
+
+async function copyText(value: string) {
+  await navigator.clipboard?.writeText(value);
 }
 
 function groupUsageByDay(windows: UsageWindow[]) {
@@ -269,6 +275,7 @@ function OpsConsole() {
   const [opsToken, setOpsToken] = useState(() => localStorage.getItem(OPS_TOKEN_STORAGE_KEY) || "");
   const [customers, setCustomers] = useState<OpsCustomerSummary[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
+  const [selectedOpsInvoiceId, setSelectedOpsInvoiceId] = useState<string | null>(null);
   const [customerDetail, setCustomerDetail] = useState<OpsCustomerDetail | null>(null);
   const [listState, setListState] = useState<LoadState>("idle");
   const [detailState, setDetailState] = useState<LoadState>("idle");
@@ -307,6 +314,7 @@ function OpsConsole() {
 
   async function loadCustomerDetail(customerId: string, activeToken = opsToken) {
     setSelectedCustomerId(customerId);
+    setSelectedOpsInvoiceId(null);
     setDetailState("loading");
     setError("");
     try {
@@ -318,6 +326,18 @@ function OpsConsole() {
       setDetailState("error");
       setError(err instanceof Error ? err.message : "Unable to load customer detail.");
     }
+  }
+
+  function useLineItemForOverride(invoice: OpsInvoice, lineItem: InvoiceLineItem) {
+    setSelectedOpsInvoiceId(invoice.id);
+    setOverrideForm({
+      invoice_id: invoice.id,
+      line_item_id: lineItem.id,
+      amount_cents: String(lineItem.amount_cents),
+      reason: "",
+    });
+    setMessage(`Loaded ${shortId(lineItem.id)} into the override form.`);
+    setError("");
   }
 
   function saveOpsToken() {
@@ -335,6 +355,7 @@ function OpsConsole() {
     setCustomers([]);
     setCustomerDetail(null);
     setSelectedCustomerId(null);
+    setSelectedOpsInvoiceId(null);
     setListState("idle");
     setDetailState("idle");
     setMessage("");
@@ -356,7 +377,8 @@ function OpsConsole() {
       setError("Credit amount must be a positive integer in cents.");
       return;
     }
-    if (!window.confirm("This creates a billing credit and audit log. Continue?")) return;
+    const creditScope = creditForm.invoice_id.trim() ? "invoice-linked" : "customer-level";
+    if (!window.confirm(`This creates a ${creditScope} billing credit and audit log. Continue?`)) return;
 
     setMessage("");
     setError("");
@@ -393,7 +415,7 @@ function OpsConsole() {
       setError("Override amount must be an integer in cents.");
       return;
     }
-    if (!window.confirm("This changes a billed invoice line item and writes an audit log. Continue?")) return;
+    if (!window.confirm(`Final warning: set line item ${shortId(overrideForm.line_item_id.trim())} to ${money(amount)} and write an audit log?`)) return;
 
     setMessage("");
     setError("");
@@ -423,6 +445,12 @@ function OpsConsole() {
     }
   }, []);
 
+  const opsTokenStatus = opsToken
+    ? { label: "Ops token saved", tone: "connected" as const }
+    : opsTokenInput.trim()
+      ? { label: "Save token to connect", tone: "missing" as const }
+      : { label: "Missing ops token", tone: "missing" as const };
+
   return (
     <>
       <header className="page-header">
@@ -436,6 +464,8 @@ function OpsConsole() {
           saved={Boolean(opsToken)}
           connectedLabel="Ops token saved"
           missingLabel="Missing ops token"
+          statusLabel={opsTokenStatus.label}
+          statusTone={opsTokenStatus.tone}
           placeholder="dev-ops-token"
           ariaLabel="Ops token"
           onChange={setOpsTokenInput}
@@ -521,7 +551,12 @@ function OpsConsole() {
                   <MiniUsageTable usage={customerDetail.recent_usage_windows} />
 
                   <h3>Invoices</h3>
-                  <InvoiceOpsTable invoices={customerDetail.invoices} />
+                  <InvoiceOpsTable
+                    invoices={customerDetail.invoices}
+                    selectedInvoiceId={selectedOpsInvoiceId}
+                    onSelectInvoice={setSelectedOpsInvoiceId}
+                    onUseLineItem={useLineItemForOverride}
+                  />
 
                   <h3>Credits</h3>
                   <CreditsTable credits={customerDetail.credits} />
@@ -533,6 +568,11 @@ function OpsConsole() {
               <>
                 <Panel title="Issue Credit">
                   <WarningText message="This creates a billing credit and audit log." />
+                  <p className="form-note">
+                    {creditForm.invoice_id.trim()
+                      ? "Mode: invoice-linked credit. A negative invoice line item will be created."
+                      : "Mode: customer-level credit. It will be tracked but not automatically applied to an invoice."}
+                  </p>
                   <div className="form-grid">
                     <label>
                       Amount cents
@@ -573,6 +613,9 @@ function OpsConsole() {
 
                 <Panel title="Override Line Item">
                   <WarningText message="This changes a billed invoice line item and writes an audit log." />
+                  <p className="form-note">
+                    Final warning before submit: this changes invoice money and records an immutable audit entry.
+                  </p>
                   <div className="form-grid">
                     <label>
                       Invoice ID
@@ -625,6 +668,8 @@ function TokenPanel({
   saved,
   connectedLabel,
   missingLabel,
+  statusLabel,
+  statusTone,
   placeholder,
   ariaLabel,
   onChange,
@@ -636,17 +681,22 @@ function TokenPanel({
   saved: boolean;
   connectedLabel: string;
   missingLabel: string;
+  statusLabel?: string;
+  statusTone?: "connected" | "missing";
   placeholder: string;
   ariaLabel: string;
   onChange: (value: string) => void;
   onSave: () => void;
   onClear: () => void;
 }) {
+  const resolvedStatusLabel = statusLabel || (saved ? connectedLabel : missingLabel);
+  const resolvedStatusTone = statusTone || (saved ? "connected" : "missing");
+
   return (
     <section className="key-panel" aria-label={ariaLabel}>
-      <div className={saved ? "status connected" : "status missing"}>
-        {saved ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-        {saved ? connectedLabel : missingLabel}
+      <div className={`status ${resolvedStatusTone}`}>
+        {resolvedStatusTone === "connected" ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+        {resolvedStatusLabel}
       </div>
       <div className="key-row">
         {icon}
@@ -770,28 +820,112 @@ function InvoiceListPanel({ invoices, onSelect }: { invoices: Invoice[]; onSelec
   );
 }
 
-function InvoiceOpsTable({ invoices }: { invoices: Invoice[] }) {
+function InvoiceOpsTable({
+  invoices,
+  selectedInvoiceId,
+  onSelectInvoice,
+  onUseLineItem,
+}: {
+  invoices: OpsInvoice[];
+  selectedInvoiceId: string | null;
+  onSelectInvoice: (invoiceId: string | null) => void;
+  onUseLineItem: (invoice: OpsInvoice, lineItem: InvoiceLineItem) => void;
+}) {
   if (invoices.length === 0) {
     return <EmptyState title="No invoices" message="This customer has no invoices yet." compact />;
   }
   return (
     <div className="table-scroll">
-      <table>
+      <table className="ops-invoice-table">
         <thead>
           <tr>
             <th>Invoice ID</th>
             <th>Period</th>
             <th>Status</th>
             <th>Total</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
-          {invoices.map((invoice) => (
-            <tr key={invoice.id}>
-              <td><code>{invoice.id}</code></td>
-              <td>{formatDate(invoice.period_start)} - {formatDate(invoice.period_end)}</td>
-              <td><span className={`pill ${invoice.status}`}>{invoice.status}</span></td>
-              <td>{money(invoice.total_cents)}</td>
+          {invoices.map((invoice) => {
+            const expanded = selectedInvoiceId === invoice.id;
+            return (
+              <Fragment key={invoice.id}>
+                <tr className={expanded ? "selected-row" : ""}>
+                  <td>
+                    <code title={invoice.id}>{shortId(invoice.id)}</code>
+                    <button className="copy-button" onClick={() => copyText(invoice.id)}>Copy</button>
+                  </td>
+                  <td>{formatDate(invoice.period_start)} - {formatDate(invoice.period_end)}</td>
+                  <td><span className={`pill ${invoice.status}`}>{invoice.status}</span></td>
+                  <td>{money(invoice.total_cents)}</td>
+                  <td>
+                    <button className="link-button" onClick={() => onSelectInvoice(expanded ? null : invoice.id)}>
+                      {expanded ? "Hide lines" : "Show lines"}
+                    </button>
+                  </td>
+                </tr>
+                {expanded && (
+                <tr className="line-items-row">
+                    <td colSpan={5}>
+                      <LineItemsTable invoice={invoice} onUseLineItem={onUseLineItem} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function LineItemsTable({
+  invoice,
+  onUseLineItem,
+}: {
+  invoice: OpsInvoice;
+  onUseLineItem: (invoice: OpsInvoice, lineItem: InvoiceLineItem) => void;
+}) {
+  const lineItems = invoice.line_items || [];
+
+  if (lineItems.length === 0) {
+    return <EmptyState title="No line items" message="This invoice detail did not include line items." compact />;
+  }
+
+  return (
+    <div className="nested-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Invoice ID</th>
+            <th>Line item ID</th>
+            <th>Description</th>
+            <th>Units</th>
+            <th>Amount</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {lineItems.map((lineItem) => (
+            <tr key={lineItem.id}>
+              <td>
+                <code title={invoice.id}>{shortId(invoice.id)}</code>
+                <button className="copy-button" onClick={() => copyText(invoice.id)}>Copy</button>
+              </td>
+              <td>
+                <code title={lineItem.id}>{shortId(lineItem.id)}</code>
+                <button className="copy-button" onClick={() => copyText(lineItem.id)}>Copy</button>
+              </td>
+              <td>{lineItem.description}</td>
+              <td>{lineItem.units.toLocaleString()}</td>
+              <td>{money(lineItem.amount_cents)}</td>
+              <td>
+                <button className="secondary compact-button" onClick={() => onUseLineItem(invoice, lineItem)}>
+                  Use for override
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>
