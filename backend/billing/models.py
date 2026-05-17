@@ -1,13 +1,20 @@
 import hashlib
+import hmac
 import secrets
 import uuid
 
+from django.conf import settings
 from django.core.validators import MinValueValidator
 from django.db import models
+from django.utils import timezone
 
 
 def hash_api_key(raw_key: str) -> str:
-    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    return hmac.new(
+        settings.API_KEY_HASH_SECRET.encode("utf-8"),
+        raw_key.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 class Customer(models.Model):
@@ -243,3 +250,62 @@ class WebhookEvent(models.Model):
 
     def __str__(self):
         return f"{self.provider_event_id} ({self.event_type})"
+
+
+class JobRun(models.Model):
+    STATUS_RUNNING = "running"
+    STATUS_SUCCEEDED = "succeeded"
+    STATUS_FAILED = "failed"
+
+    STATUS_CHOICES = [
+        (STATUS_RUNNING, "Running"),
+        (STATUS_SUCCEEDED, "Succeeded"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    job_name = models.CharField(max_length=255)
+    lock_key = models.CharField(max_length=255, unique=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES)
+    started_at = models.DateTimeField()
+    finished_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict)
+
+    @classmethod
+    def start(cls, job_name: str, lock_key: str):
+        from django.db import transaction
+
+        now = timezone.now()
+        with transaction.atomic():
+            job, _ = cls.objects.select_for_update().get_or_create(
+                lock_key=lock_key,
+                defaults={
+                    "job_name": job_name,
+                    "status": cls.STATUS_RUNNING,
+                    "started_at": now,
+                },
+            )
+            if job.status == cls.STATUS_RUNNING and job.finished_at is None and job.started_at != now:
+                return None
+            job.job_name = job_name
+            job.status = cls.STATUS_RUNNING
+            job.started_at = now
+            job.finished_at = None
+            job.metadata = {}
+            job.save(update_fields=["job_name", "status", "started_at", "finished_at", "metadata"])
+            return job
+
+    def mark_succeeded(self, metadata=None):
+        self.status = self.STATUS_SUCCEEDED
+        self.finished_at = timezone.now()
+        self.metadata = metadata or {}
+        self.save(update_fields=["status", "finished_at", "metadata"])
+
+    def mark_failed(self, error: str):
+        self.status = self.STATUS_FAILED
+        self.finished_at = timezone.now()
+        self.metadata = {"error": error}
+        self.save(update_fields=["status", "finished_at", "metadata"])
+
+    def __str__(self):
+        return f"{self.job_name} ({self.status})"

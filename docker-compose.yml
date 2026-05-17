@@ -26,6 +26,8 @@ services:
       DB_HOST: db
       DB_PORT: "5432"
       PAYMENT_WEBHOOK_SECRET: dev-payment-secret
+      API_KEY_HASH_SECRET: dev-api-key-hash-secret
+      OPS_TOKEN: dev-ops-token
     depends_on:
       - db
 

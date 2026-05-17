@@ -130,3 +130,5 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 PAYMENT_WEBHOOK_SECRET = os.environ.get('PAYMENT_WEBHOOK_SECRET', 'dev-payment-secret')
+API_KEY_HASH_SECRET = os.environ.get('API_KEY_HASH_SECRET', 'dev-api-key-hash-secret')
+OPS_TOKEN = os.environ.get('OPS_TOKEN', 'dev-ops-token')

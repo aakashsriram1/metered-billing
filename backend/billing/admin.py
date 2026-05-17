@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import ApiKey, AuditLog, Credit, Customer, Invoice, InvoiceLineItem, PricePlan, UsageEvent, UsageWindow, WebhookEvent
+from .models import ApiKey, AuditLog, Credit, Customer, Invoice, InvoiceLineItem, JobRun, PricePlan, UsageEvent, UsageWindow, WebhookEvent
 
 
 @admin.register(PricePlan)
@@ -90,3 +90,11 @@ class WebhookEventAdmin(admin.ModelAdmin):
     list_display = ("provider_event_id", "event_type", "processed_at", "created_at")
     search_fields = ("provider_event_id", "event_type", "payload_hash")
     readonly_fields = ("id", "provider_event_id", "event_type", "payload_hash", "processed_at", "created_at")
+
+
+@admin.register(JobRun)
+class JobRunAdmin(admin.ModelAdmin):
+    list_display = ("job_name", "lock_key", "status", "started_at", "finished_at")
+    list_filter = ("status", "job_name")
+    search_fields = ("job_name", "lock_key")
+    readonly_fields = ("id", "started_at", "finished_at")

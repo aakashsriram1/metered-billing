@@ -4,6 +4,7 @@ import io
 import json
 from datetime import datetime, timedelta, timezone as datetime_timezone
 
+from django.conf import settings
 from django.core.management import call_command
 from django.db.models import Sum
 from django.test import override_settings
@@ -11,7 +12,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from .management.commands.aggregate_usage import Command as AggregateUsageCommand
-from .models import ApiKey, AuditLog, Credit, Customer, Invoice, PricePlan, UsageEvent, UsageWindow, WebhookEvent
+from .models import ApiKey, AuditLog, Credit, Customer, Invoice, JobRun, PricePlan, UsageEvent, UsageWindow, WebhookEvent
 from .services import calculate_tiered_amount_cents, generate_invoice_for_customer
 
 
@@ -45,6 +46,18 @@ class EventIngestionTests(APITestCase):
         self.assertEqual(response.data["duplicate_count"], 0)
         self.assertEqual(response.data["total_received"], 1)
         self.assertEqual(UsageEvent.objects.count(), 1)
+
+    def test_wrong_api_key_fails(self):
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer sk_test_wrong")
+
+        response = self.client.post("/v1/events", self.payload(), format="json")
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(UsageEvent.objects.count(), 0)
+
+    def test_api_key_hash_is_hmac_not_raw_or_plain_sha256(self):
+        self.assertNotEqual(self.api_key.key_hash, self.raw_key)
+        self.assertNotEqual(self.api_key.key_hash, hashlib.sha256(self.raw_key.encode("utf-8")).hexdigest())
 
     def test_missing_api_key_returns_401(self):
         response = self.client.post("/v1/events", self.payload(), format="json")
@@ -345,6 +358,42 @@ class BillingTests(APITestCase):
         self.assertEqual(second.line_items.count(), 3)
         self.assertEqual(second.total_cents, 11_500)
 
+    def test_paid_invoice_is_not_changed_by_generate_invoices(self):
+        self.create_window(total_units=20_000)
+        invoice = generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
+        original_total = invoice.total_cents
+        original_line_count = invoice.line_items.count()
+        invoice.status = Invoice.STATUS_PAID
+        invoice.paid_at = timezone.now()
+        invoice.save(update_fields=["status", "paid_at", "updated_at"])
+        UsageWindow.objects.filter(customer=self.customer, api_key=self.api_key).update(total_units=150_000)
+
+        regenerated = generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
+
+        regenerated.refresh_from_db()
+        self.assertEqual(regenerated.status, Invoice.STATUS_PAID)
+        self.assertEqual(regenerated.total_cents, original_total)
+        self.assertEqual(regenerated.line_items.count(), original_line_count)
+        self.assertTrue(regenerated._generation_skipped)
+
+    def test_overridden_line_item_is_preserved_by_generate_invoices(self):
+        self.create_window(total_units=20_000)
+        invoice = generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
+        line_item = invoice.line_items.order_by("-amount_cents").first()
+        line_item.amount_cents = 1234
+        line_item.override_reason = "Manual adjustment"
+        line_item.overridden_by = "ops@example.com"
+        line_item.overridden_at = timezone.now()
+        line_item.save(update_fields=["amount_cents", "override_reason", "overridden_by", "overridden_at", "updated_at"])
+
+        regenerated = generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
+
+        line_item.refresh_from_db()
+        regenerated.refresh_from_db()
+        self.assertEqual(line_item.amount_cents, 1234)
+        self.assertEqual(regenerated.total_cents, sum(item.amount_cents for item in regenerated.line_items.all()))
+        self.assertTrue(regenerated._generation_skipped)
+
     def test_customer_can_list_own_invoices(self):
         self.create_window(total_units=20_000)
         generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
@@ -399,16 +448,36 @@ class OpsTests(APITestCase):
         )
         self.invoice = generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
 
+    def ops_headers(self, **extra):
+        headers = {"HTTP_X_OPS_TOKEN": settings.OPS_TOKEN}
+        headers.update(extra)
+        return headers
+
     def test_ops_can_list_customers(self):
-        response = self.client.get("/ops/customers")
+        response = self.client.get("/ops/customers", **self.ops_headers())
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)
         self.assertEqual(response.data["results"][0]["name"], "Alpha Ops")
         self.assertEqual(response.data["results"][0]["invoice_count"], 1)
 
+    def test_missing_ops_token_rejected(self):
+        response = self.client.get("/ops/customers")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_invalid_ops_token_rejected(self):
+        response = self.client.get("/ops/customers", HTTP_X_OPS_TOKEN="wrong")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_valid_ops_token_accepted(self):
+        response = self.client.get("/ops/customers", **self.ops_headers())
+
+        self.assertEqual(response.status_code, 200)
+
     def test_ops_can_retrieve_customer_detail(self):
-        response = self.client.get(f"/ops/customers/{self.customer.id}")
+        response = self.client.get(f"/ops/customers/{self.customer.id}", **self.ops_headers())
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["id"], str(self.customer.id))
@@ -426,7 +495,7 @@ class OpsTests(APITestCase):
                 "idempotency_key": "credit_123",
             },
             format="json",
-            HTTP_X_OPS_ACTOR="ops-user@example.com",
+            **self.ops_headers(HTTP_X_OPS_ACTOR="ops-user@example.com"),
         )
 
         self.assertEqual(response.status_code, 201)
@@ -444,14 +513,103 @@ class OpsTests(APITestCase):
             "idempotency_key": "credit_123",
         }
 
-        first = self.client.post(f"/ops/customers/{self.customer.id}/credits", payload, format="json")
-        second = self.client.post(f"/ops/customers/{self.customer.id}/credits", payload, format="json")
+        first = self.client.post(f"/ops/customers/{self.customer.id}/credits", payload, format="json", **self.ops_headers())
+        second = self.client.post(f"/ops/customers/{self.customer.id}/credits", payload, format="json", **self.ops_headers())
 
         self.assertEqual(first.status_code, 201)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(Credit.objects.count(), 1)
         self.assertEqual(AuditLog.objects.count(), 1)
         self.assertFalse(second.data["created"])
+
+    def test_credit_endpoint_requires_token(self):
+        response = self.client.post(
+            f"/ops/customers/{self.customer.id}/credits",
+            {
+                "amount_cents": 500,
+                "reason": "Goodwill credit",
+                "idempotency_key": "credit_123",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_invoice_linked_credit_creates_negative_line_item(self):
+        response = self.client.post(
+            f"/ops/customers/{self.customer.id}/credits",
+            {
+                "amount_cents": 500,
+                "reason": "Invoice goodwill credit",
+                "idempotency_key": "invoice-credit-123",
+                "invoice_id": str(self.invoice.id),
+            },
+            format="json",
+            **self.ops_headers(),
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(self.invoice.line_items.filter(amount_cents=-500, metadata__type="credit").exists())
+
+    def test_invoice_linked_credit_recomputes_invoice_total(self):
+        original_total = self.invoice.total_cents
+
+        self.client.post(
+            f"/ops/customers/{self.customer.id}/credits",
+            {
+                "amount_cents": 500,
+                "reason": "Invoice goodwill credit",
+                "idempotency_key": "invoice-credit-123",
+                "invoice_id": str(self.invoice.id),
+            },
+            format="json",
+            **self.ops_headers(),
+        )
+
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.total_cents, max(original_total - 500, 0))
+
+    def test_duplicate_invoice_linked_credit_does_not_double_apply(self):
+        payload = {
+            "amount_cents": 500,
+            "reason": "Invoice goodwill credit",
+            "idempotency_key": "invoice-credit-123",
+            "invoice_id": str(self.invoice.id),
+        }
+
+        self.client.post(f"/ops/customers/{self.customer.id}/credits", payload, format="json", **self.ops_headers())
+        self.client.post(f"/ops/customers/{self.customer.id}/credits", payload, format="json", **self.ops_headers())
+
+        self.assertEqual(Credit.objects.filter(idempotency_key="invoice-credit-123").count(), 1)
+        self.assertEqual(self.invoice.line_items.filter(metadata__type="credit").count(), 1)
+
+    def test_invoice_id_from_another_customer_is_rejected(self):
+        other_customer = Customer.objects.create(name="Other Ops", email="other-ops@example.com", price_plan=self.price_plan)
+        other_key, _ = ApiKey.create_key(other_customer, "Other ops key")
+        UsageWindow.objects.create(
+            customer=other_customer,
+            api_key=other_key,
+            window_start=datetime(2026, 5, 16, 18, 0, tzinfo=datetime_timezone.utc),
+            window_end=datetime(2026, 5, 16, 19, 0, tzinfo=datetime_timezone.utc),
+            total_units=20_000,
+            event_count=5,
+        )
+        other_invoice = generate_invoice_for_customer(other_customer, self.period_start, self.period_end)
+
+        response = self.client.post(
+            f"/ops/customers/{self.customer.id}/credits",
+            {
+                "amount_cents": 500,
+                "reason": "Bad invoice id",
+                "idempotency_key": "bad-invoice-id",
+                "invoice_id": str(other_invoice.id),
+            },
+            format="json",
+            **self.ops_headers(),
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(Credit.objects.filter(idempotency_key="bad-invoice-id").exists())
 
     def test_line_item_override_updates_amount(self):
         line_item = self.invoice.line_items.order_by("-amount_cents").first()
@@ -463,7 +621,7 @@ class OpsTests(APITestCase):
                 "reason": "Corrected usage dispute",
             },
             format="json",
-            HTTP_X_OPS_ACTOR="ops-user@example.com",
+            **self.ops_headers(HTTP_X_OPS_ACTOR="ops-user@example.com"),
         )
 
         self.assertEqual(response.status_code, 200)
@@ -483,6 +641,7 @@ class OpsTests(APITestCase):
                 "reason": "Corrected usage dispute",
             },
             format="json",
+            **self.ops_headers(),
         )
 
         audit = AuditLog.objects.get(action="invoice_line_item.override")
@@ -497,9 +656,24 @@ class OpsTests(APITestCase):
             f"/ops/invoices/{self.invoice.id}/line-items/{line_item.id}",
             {"amount_cents": 2500},
             format="json",
+            **self.ops_headers(),
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_line_item_override_requires_token(self):
+        line_item = self.invoice.line_items.order_by("-amount_cents").first()
+
+        response = self.client.patch(
+            f"/ops/invoices/{self.invoice.id}/line-items/{line_item.id}",
+            {
+                "amount_cents": 2500,
+                "reason": "Corrected usage dispute",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 401)
 
     def test_invoice_total_is_recomputed_after_override(self):
         line_item = self.invoice.line_items.order_by("-amount_cents").first()
@@ -511,6 +685,7 @@ class OpsTests(APITestCase):
                 "reason": "Corrected usage dispute",
             },
             format="json",
+            **self.ops_headers(),
         )
 
         self.invoice.refresh_from_db()
@@ -518,6 +693,31 @@ class OpsTests(APITestCase):
             self.invoice.total_cents,
             sum(item.amount_cents for item in self.invoice.line_items.all()),
         )
+
+
+class JobRunTests(APITestCase):
+    def test_second_run_with_existing_running_lock_skips(self):
+        JobRun.objects.create(
+            job_name="aggregate_usage",
+            lock_key="aggregate_usage",
+            status=JobRun.STATUS_RUNNING,
+            started_at=timezone.now(),
+        )
+        out = io.StringIO()
+
+        call_command("aggregate_usage", start="2026-05-16T00:00:00Z", end="2026-05-17T00:00:00Z", stdout=out)
+
+        self.assertIn("already running", out.getvalue())
+        self.assertEqual(JobRun.objects.get(lock_key="aggregate_usage").status, JobRun.STATUS_RUNNING)
+
+    def test_successful_job_marks_jobrun_succeeded(self):
+        out = io.StringIO()
+
+        call_command("aggregate_usage", start="2026-05-16T00:00:00Z", end="2026-05-17T00:00:00Z", stdout=out)
+
+        job = JobRun.objects.get(lock_key="aggregate_usage")
+        self.assertEqual(job.status, JobRun.STATUS_SUCCEEDED)
+        self.assertIsNotNone(job.finished_at)
 
 
 @override_settings(PAYMENT_WEBHOOK_SECRET="test-payment-secret")

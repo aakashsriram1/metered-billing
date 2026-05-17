@@ -1,6 +1,18 @@
+from dataclasses import dataclass
+
+from django.conf import settings
 from rest_framework import authentication, exceptions
 
 from .models import ApiKey, hash_api_key
+
+
+@dataclass
+class OpsUser:
+    token: str
+
+    @property
+    def is_authenticated(self):
+        return True
 
 
 class ApiKeyAuthentication(authentication.BaseAuthentication):
@@ -27,6 +39,19 @@ class ApiKeyAuthentication(authentication.BaseAuthentication):
         request.customer = api_key.customer
         request.api_key = api_key
         return api_key.customer, None
+
+    def authenticate_header(self, request):
+        return self.keyword
+
+
+class OpsTokenAuthentication(authentication.BaseAuthentication):
+    keyword = "X-Ops-Token"
+
+    def authenticate(self, request):
+        token = request.headers.get(self.keyword, "")
+        if not token or token != settings.OPS_TOKEN:
+            raise exceptions.AuthenticationFailed("Missing or invalid ops token")
+        return OpsUser(token), None
 
     def authenticate_header(self, request):
         return self.keyword

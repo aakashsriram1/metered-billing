@@ -6,7 +6,7 @@ from django.db.models.functions import TruncHour
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from billing.models import UsageEvent, UsageWindow
+from billing.models import JobRun, UsageEvent, UsageWindow
 
 
 def parse_iso_datetime(value: str):
@@ -32,31 +32,41 @@ class Command(BaseCommand):
         if start >= end:
             raise CommandError("--start must be before --end")
 
-        buckets = (
-            UsageEvent.objects.filter(timestamp__gte=start, timestamp__lt=end)
-            .annotate(window_start=TruncHour("timestamp"))
-            .values("customer_id", "api_key_id", "window_start")
-            .annotate(total_units=Sum("units"), event_count=Count("id"))
-            .order_by()
-        )
+        job = JobRun.start("aggregate_usage", "aggregate_usage")
+        if job is None:
+            self.stdout.write("aggregate_usage is already running; skipped.")
+            return
 
-        window_count = 0
-        for bucket in buckets:
-            window_start = bucket["window_start"]
-            UsageWindow.objects.update_or_create(
-                customer_id=bucket["customer_id"],
-                api_key_id=bucket["api_key_id"],
-                window_start=window_start,
-                defaults={
-                    "window_end": window_start + timedelta(hours=1),
-                    "total_units": bucket["total_units"],
-                    "event_count": bucket["event_count"],
-                },
+        try:
+            buckets = (
+                UsageEvent.objects.filter(timestamp__gte=start, timestamp__lt=end)
+                .annotate(window_start=TruncHour("timestamp"))
+                .values("customer_id", "api_key_id", "window_start")
+                .annotate(total_units=Sum("units"), event_count=Count("id"))
+                .order_by()
             )
-            window_count += 1
 
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"Aggregated {window_count} usage window(s) from {start.isoformat()} to {end.isoformat()}."
+            window_count = 0
+            for bucket in buckets:
+                window_start = bucket["window_start"]
+                UsageWindow.objects.update_or_create(
+                    customer_id=bucket["customer_id"],
+                    api_key_id=bucket["api_key_id"],
+                    window_start=window_start,
+                    defaults={
+                        "window_end": window_start + timedelta(hours=1),
+                        "total_units": bucket["total_units"],
+                        "event_count": bucket["event_count"],
+                    },
+                )
+                window_count += 1
+
+            job.mark_succeeded({"window_count": window_count})
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"Aggregated {window_count} usage window(s) from {start.isoformat()} to {end.isoformat()}."
+                )
             )
-        )
+        except Exception as exc:
+            job.mark_failed(str(exc))
+            raise

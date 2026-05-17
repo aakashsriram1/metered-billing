@@ -20,7 +20,7 @@ def tiered_line_items(total_units: int, price_plan: PricePlan):
             "units": free_units,
             "unit_price_micros": 0,
             "amount_cents": 0,
-            "metadata": {"tier": "free"},
+            "metadata": {"type": "usage", "tier": "free"},
         }
     ]
 
@@ -31,7 +31,7 @@ def tiered_line_items(total_units: int, price_plan: PricePlan):
                 "units": tier_1_units,
                 "unit_price_micros": price_plan.tier_1_price_micros,
                 "amount_cents": micros_to_cents(tier_1_units, price_plan.tier_1_price_micros),
-                "metadata": {"tier": "tier_1"},
+                "metadata": {"type": "usage", "tier": "tier_1"},
             }
         )
 
@@ -42,7 +42,7 @@ def tiered_line_items(total_units: int, price_plan: PricePlan):
                 "units": tier_2_units,
                 "unit_price_micros": price_plan.tier_2_price_micros,
                 "amount_cents": micros_to_cents(tier_2_units, price_plan.tier_2_price_micros),
-                "metadata": {"tier": "tier_2"},
+                "metadata": {"type": "usage", "tier": "tier_2"},
             }
         )
 
@@ -61,15 +61,6 @@ def default_price_plan():
 def generate_invoice_for_customer(customer: Customer, period_start, period_end):
     price_plan = customer.price_plan or default_price_plan()
 
-    total_units = (
-        UsageWindow.objects.filter(
-            customer=customer,
-            window_start__gte=period_start,
-            window_start__lt=period_end,
-        ).aggregate(total=Sum("total_units"))["total"]
-        or 0
-    )
-
     with transaction.atomic():
         invoice, _ = Invoice.objects.get_or_create(
             customer=customer,
@@ -77,15 +68,36 @@ def generate_invoice_for_customer(customer: Customer, period_start, period_end):
             period_end=period_end,
         )
 
-        InvoiceLineItem.objects.filter(invoice=invoice).delete()
+        if invoice.status == Invoice.STATUS_PAID:
+            invoice._generation_skipped = True
+            invoice._generation_skip_reason = "paid"
+            return invoice
+
+        if invoice.line_items.filter(overridden_at__isnull=False).exists():
+            recompute_invoice_total(invoice)
+            invoice._generation_skipped = True
+            invoice._generation_skip_reason = "manual_overrides"
+            return invoice
+
+        total_units = (
+            UsageWindow.objects.filter(
+                customer=customer,
+                window_start__gte=period_start,
+                window_start__lt=period_end,
+            ).aggregate(total=Sum("total_units"))["total"]
+            or 0
+        )
+
+        InvoiceLineItem.objects.filter(invoice=invoice, metadata__type="usage", overridden_at__isnull=True).delete()
         for item in tiered_line_items(total_units, price_plan):
             InvoiceLineItem.objects.create(invoice=invoice, **item)
 
-        invoice.total_cents = sum(line.amount_cents for line in invoice.line_items.all())
+        invoice.total_cents = max(sum(line.amount_cents for line in invoice.line_items.all()), 0)
         if invoice.status == Invoice.STATUS_DRAFT:
             invoice.status = Invoice.STATUS_ISSUED
             invoice.issued_at = timezone.now()
         invoice.save(update_fields=["total_cents", "status", "issued_at", "updated_at"])
+        invoice._generation_skipped = False
         return invoice
 
 
@@ -97,13 +109,15 @@ def generate_invoices(period_start, period_end):
 
 
 def recompute_invoice_total(invoice: Invoice):
-    invoice.total_cents = invoice.line_items.aggregate(total=Sum("amount_cents"))["total"] or 0
+    invoice.total_cents = max(invoice.line_items.aggregate(total=Sum("amount_cents"))["total"] or 0, 0)
     invoice.save(update_fields=["total_cents", "updated_at"])
     return invoice
 
 
 def issue_credit(customer: Customer, amount_cents: int, reason: str, idempotency_key: str, actor: str, invoice=None):
     with transaction.atomic():
+        if invoice is not None:
+            invoice = Invoice.objects.select_for_update().get(id=invoice.id, customer=customer)
         credit, created = Credit.objects.get_or_create(
             customer=customer,
             idempotency_key=idempotency_key,
@@ -115,6 +129,17 @@ def issue_credit(customer: Customer, amount_cents: int, reason: str, idempotency
             },
         )
         if created:
+            credit_line_item = None
+            if invoice is not None:
+                credit_line_item = InvoiceLineItem.objects.create(
+                    invoice=invoice,
+                    description=f"Credit: {reason}",
+                    units=0,
+                    unit_price_micros=0,
+                    amount_cents=-amount_cents,
+                    metadata={"type": "credit", "credit_id": str(credit.id)},
+                )
+                recompute_invoice_total(invoice)
             AuditLog.objects.create(
                 actor=actor,
                 action="credit.create",
@@ -127,6 +152,8 @@ def issue_credit(customer: Customer, amount_cents: int, reason: str, idempotency
                     "amount_cents": amount_cents,
                     "reason": reason,
                     "idempotency_key": idempotency_key,
+                    "invoice_line_item_id": str(credit_line_item.id) if credit_line_item else None,
+                    "invoice_total_cents": invoice.total_cents if invoice else None,
                 },
                 reason=reason,
             )

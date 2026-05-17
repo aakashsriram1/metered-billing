@@ -13,7 +13,7 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .authentication import ApiKeyAuthentication
+from .authentication import ApiKeyAuthentication, OpsTokenAuthentication
 from .models import ApiKey, AuditLog, Customer, Invoice, InvoiceLineItem, UsageEvent, UsageWindow, WebhookEvent
 from .serializers import (
     CreditSerializer,
@@ -25,10 +25,20 @@ from .serializers import (
 from .services import issue_credit, override_invoice_line_item
 
 
-class EventIngestionView(APIView):
+class CustomerScopedMixin:
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [permissions.IsAuthenticated]
 
+    def scope_to_customer(self, queryset):
+        return queryset.filter(customer=self.request.customer)
+
+
+class OpsScopedMixin:
+    authentication_classes = [OpsTokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+
+class EventIngestionView(CustomerScopedMixin, APIView):
     def post(self, request):
         events = request.data.get("events", [])
         serializer = UsageEventInputSerializer(data=events, many=True)
@@ -62,17 +72,13 @@ class EventIngestionView(APIView):
         )
 
 
-class UsageView(APIView):
-    authentication_classes = [ApiKeyAuthentication]
-    permission_classes = [permissions.IsAuthenticated]
-
+class UsageView(CustomerScopedMixin, APIView):
     def get(self, request):
         start, end = self.date_range(request)
         page = self.positive_int(request.query_params.get("page"), default=1, maximum=None)
         page_size = self.positive_int(request.query_params.get("page_size"), default=50, maximum=200)
 
-        queryset = UsageWindow.objects.filter(
-            customer=request.customer,
+        queryset = self.scope_to_customer(UsageWindow.objects.all()).filter(
             window_start__gte=start,
             window_start__lt=end,
         )
@@ -136,35 +142,23 @@ class UsageView(APIView):
         return parsed
 
 
-class InvoiceListView(APIView):
-    authentication_classes = [ApiKeyAuthentication]
-    permission_classes = [permissions.IsAuthenticated]
-
+class InvoiceListView(CustomerScopedMixin, APIView):
     def get(self, request):
-        invoices = Invoice.objects.filter(customer=request.customer).order_by("-period_start")
+        invoices = self.scope_to_customer(Invoice.objects.all()).order_by("-period_start")
         return Response({"results": InvoiceListSerializer(invoices, many=True).data})
 
 
-class InvoiceDetailView(APIView):
-    authentication_classes = [ApiKeyAuthentication]
-    permission_classes = [permissions.IsAuthenticated]
-
+class InvoiceDetailView(CustomerScopedMixin, APIView):
     def get(self, request, invoice_id):
         try:
-            invoice = Invoice.objects.prefetch_related("line_items").get(
-                id=invoice_id,
-                customer=request.customer,
-            )
+            invoice = self.scope_to_customer(Invoice.objects.prefetch_related("line_items")).get(id=invoice_id)
         except Invoice.DoesNotExist:
             raise exceptions.NotFound("Invoice not found")
 
         return Response(InvoiceDetailSerializer(invoice).data)
 
 
-class OpsCustomerListView(APIView):
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
-
+class OpsCustomerListView(OpsScopedMixin, APIView):
     def get(self, request):
         month_start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         customers = Customer.objects.annotate(invoice_count=Count("invoices")).order_by("name")
@@ -188,10 +182,7 @@ class OpsCustomerListView(APIView):
         return Response({"results": results})
 
 
-class OpsCustomerDetailView(APIView):
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
-
+class OpsCustomerDetailView(OpsScopedMixin, APIView):
     def get(self, request, customer_id):
         try:
             customer = Customer.objects.get(id=customer_id)
@@ -234,10 +225,7 @@ class OpsCustomerDetailView(APIView):
         return previous_daily_average > 0 and last_24h_total >= previous_daily_average * 10
 
 
-class OpsCreditView(APIView):
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
-
+class OpsCreditView(OpsScopedMixin, APIView):
     def post(self, request, customer_id):
         try:
             customer = Customer.objects.get(id=customer_id)
@@ -247,6 +235,7 @@ class OpsCreditView(APIView):
         amount_cents = int(request.data.get("amount_cents", 0))
         reason = request.data.get("reason", "").strip()
         idempotency_key = request.data.get("idempotency_key", "").strip()
+        invoice_id = request.data.get("invoice_id")
         actor = request.headers.get("X-Ops-Actor", "ops@example.com")
 
         if amount_cents <= 0:
@@ -256,12 +245,20 @@ class OpsCreditView(APIView):
         if not idempotency_key:
             raise exceptions.ValidationError({"idempotency_key": "This field is required."})
 
+        invoice = None
+        if invoice_id:
+            try:
+                invoice = Invoice.objects.get(id=invoice_id, customer=customer)
+            except Invoice.DoesNotExist:
+                raise exceptions.NotFound("Invoice not found")
+
         credit, created = issue_credit(
             customer=customer,
             amount_cents=amount_cents,
             reason=reason,
             idempotency_key=idempotency_key,
             actor=actor,
+            invoice=invoice,
         )
         return Response(
             {
@@ -272,10 +269,7 @@ class OpsCreditView(APIView):
         )
 
 
-class OpsLineItemOverrideView(APIView):
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
-
+class OpsLineItemOverrideView(OpsScopedMixin, APIView):
     def patch(self, request, invoice_id, line_item_id):
         reason = request.data.get("reason", "").strip()
         if not reason:

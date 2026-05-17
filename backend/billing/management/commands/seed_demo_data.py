@@ -12,6 +12,7 @@ from billing.models import (
     Customer,
     Invoice,
     InvoiceLineItem,
+    JobRun,
     PricePlan,
     UsageEvent,
     UsageWindow,
@@ -79,6 +80,7 @@ class Command(BaseCommand):
         Invoice.objects.all().delete()
         UsageWindow.objects.all().delete()
         UsageEvent.objects.all().delete()
+        JobRun.objects.all().delete()
         ApiKey.objects.all().delete()
         Customer.objects.all().delete()
         PricePlan.objects.all().delete()
