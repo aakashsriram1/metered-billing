@@ -1,4 +1,4 @@
-from datetime import datetime, timezone as datetime_timezone
+from datetime import datetime, timedelta, timezone as datetime_timezone
 
 from django.utils import timezone
 from rest_framework.test import APITestCase
@@ -169,3 +169,101 @@ class UsageAggregationTests(APITestCase):
             UsageWindow.objects.get(api_key=second_api_key).total_units,
             5,
         )
+
+
+class UsageEndpointTests(APITestCase):
+    def setUp(self):
+        self.customer = Customer.objects.create(name="Alpha Usage", email="alpha-usage@example.com")
+        self.api_key, self.raw_key = ApiKey.create_key(self.customer, "Alpha usage key")
+        self.second_api_key, _ = ApiKey.create_key(self.customer, "Alpha second key")
+        self.other_customer = Customer.objects.create(name="Beta Usage", email="beta-usage@example.com")
+        self.other_api_key, _ = ApiKey.create_key(self.other_customer, "Beta usage key")
+
+        self.window_time = datetime(2026, 5, 16, 18, 0, tzinfo=datetime_timezone.utc)
+        self.old_window_time = datetime(2026, 4, 16, 18, 0, tzinfo=datetime_timezone.utc)
+
+    def auth(self):
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.raw_key}")
+
+    def create_window(self, customer=None, api_key=None, window_start=None, total_units=10, event_count=1):
+        start = window_start or self.window_time
+        return UsageWindow.objects.create(
+            customer=customer or self.customer,
+            api_key=api_key or self.api_key,
+            window_start=start,
+            window_end=start + timedelta(hours=1),
+            total_units=total_units,
+            event_count=event_count,
+        )
+
+    def test_authenticated_customer_can_list_own_usage(self):
+        self.create_window(total_units=123, event_count=4)
+        self.auth()
+
+        response = self.client.get("/v1/usage")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["total"], 1)
+        self.assertEqual(response.data["results"][0]["total_units"], 123)
+        self.assertEqual(response.data["results"][0]["event_count"], 4)
+
+    def test_customer_cannot_see_another_customers_usage(self):
+        self.create_window(customer=self.other_customer, api_key=self.other_api_key, total_units=999)
+        self.auth()
+
+        response = self.client.get("/v1/usage")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["total"], 0)
+        self.assertEqual(response.data["results"], [])
+
+    def test_api_key_id_filter_works_for_own_api_key(self):
+        self.create_window(api_key=self.api_key, total_units=10)
+        self.create_window(api_key=self.second_api_key, total_units=20)
+        self.auth()
+
+        response = self.client.get(f"/v1/usage?api_key_id={self.second_api_key.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["total"], 1)
+        self.assertEqual(response.data["results"][0]["api_key_id"], str(self.second_api_key.id))
+        self.assertEqual(response.data["results"][0]["total_units"], 20)
+
+    def test_api_key_id_from_another_customer_does_not_leak_data(self):
+        self.create_window(customer=self.other_customer, api_key=self.other_api_key, total_units=999)
+        self.auth()
+
+        response = self.client.get(f"/v1/usage?api_key_id={self.other_api_key.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["total"], 0)
+        self.assertEqual(response.data["results"], [])
+
+    def test_date_range_filter_works(self):
+        self.create_window(window_start=self.window_time, total_units=10)
+        self.create_window(window_start=self.old_window_time, total_units=20)
+        self.auth()
+
+        response = self.client.get(
+            "/v1/usage?start=2026-05-01T00:00:00Z&end=2026-06-01T00:00:00Z"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["total"], 1)
+        self.assertEqual(response.data["results"][0]["total_units"], 10)
+
+    def test_pagination_works(self):
+        for hour in range(3):
+            self.create_window(
+                window_start=datetime(2026, 5, 16, hour, 0, tzinfo=datetime_timezone.utc),
+                total_units=hour + 1,
+            )
+        self.auth()
+
+        response = self.client.get("/v1/usage?page=2&page_size=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["page"], 2)
+        self.assertEqual(response.data["page_size"], 1)
+        self.assertEqual(response.data["total"], 3)
+        self.assertEqual(len(response.data["results"]), 1)
