@@ -461,6 +461,7 @@ class OpsTests(APITestCase):
         self.assertEqual(len(response.data["results"]), 1)
         self.assertEqual(response.data["results"][0]["name"], "Alpha Ops")
         self.assertEqual(response.data["results"][0]["invoice_count"], 1)
+        self.assertIn("anomaly", response.data["results"][0])
 
     def test_missing_ops_token_rejected(self):
         response = self.client.get("/ops/customers")

@@ -12,7 +12,7 @@ The design favors correctness and debuggability over premature distributed infra
 
 `PricePlan` stores the tier configuration. `Invoice` stores a customer billing period and status. `InvoiceLineItem` stores priced usage tiers, credits, and manual override metadata. `Credit` stores customer-level or invoice-linked credits. `AuditLog` records money-moving ops actions. `WebhookEvent` records payment processor deliveries. `JobRun` records background job locks and status.
 
-The important constraints are in the database, not just comments. `UsageEvent.request_id` is unique. `UsageWindow(customer, api_key, window_start)` is unique. `Invoice(customer, period_start, period_end)` is unique. `Credit(customer, idempotency_key)` is unique. `WebhookEvent.provider_event_id` is unique. `JobRun.lock_key` is unique.
+The important constraints are in the database, not just comments. `UsageEvent.request_id` is unique. `UsageWindow(customer, api_key, window_start)` is protected by `unique_usage_window_customer_api_key_hour`. `Invoice(customer, period_start, period_end)` is protected by `unique_invoice_customer_period`. `Credit(customer, idempotency_key)` is protected by `unique_credit_customer_idempotency_key`. `WebhookEvent.provider_event_id` and `JobRun.lock_key` are also unique.
 
 Indexes match the queries the app runs: usage events by customer/date and API key/date, windows by customer/window and API key/window, invoices by customer/period, credits by customer/created time, plus unique lookups for webhooks and jobs. Money is stored as integer cents (`amount_cents`) and integer micros (`unit_price_micros`), never floats.
 
@@ -76,6 +76,10 @@ The `worker` service runs `run_worker`. Each tick runs `aggregate_usage` for the
 
 The scheduler itself is thin. The commands own their locks through `JobRun`, so multiple workers or retries do not double-apply billing work.
 
+## Observability
+
+For production I would alert on failed or stale `JobRun` rows, aggregation lag beyond the expected 60-second cadence, webhook signature failures or replay spikes, Billing Inspector mismatches between raw events/windows/invoices, unusual credit or override volume, and invoice generation skips for paid invoices. The local version exposes the core data for this through `JobRun`, `WebhookEvent`, `AuditLog`, and Billing Inspector instead of adding a full metrics stack.
+
 ## Scaling Path
 
 The target is 5,000 active customers, 200 events/sec sustained, 2,000/sec peak, and about 500M events/month. Two hundred events/sec is about 17.3M events/day. The current design is enough for the take-home and a small product, but not for unbounded raw event growth.
@@ -102,11 +106,15 @@ A compromised webhook source may replay old deliveries or send modified bodies. 
 
 ## Trade-Offs
 
-I chose Django/DRF/Postgres over FastAPI or Node because the ORM, transactions, admin, and company-stack alignment matter for a billing system. I chose a DB-backed worker over Celery/Redis to keep local setup simple while still showing locked jobs. I kept raw events instead of aggregate-only storage because billing disputes need recomputation. I kept ingestion synchronous for clarity; the scale path is queue plus bulk insert.
+I chose Django/DRF/Postgres over FastAPI or Node because the ORM, transactions, admin, and company-stack alignment matter for a billing system. The rejected option would have been a lighter API framework, but it would have moved more transaction and admin safety into custom code.
+
+I chose a DB-backed worker over Celery/Redis to keep local setup simple while still showing locked jobs. Celery would be a good production step, but it adds a broker and more moving parts before the core billing behavior is proven.
+
+I kept raw events instead of aggregate-only storage because billing disputes need recomputation. Aggregate-only storage would be cheaper, but it would make late-event reconciliation and invoice debugging much weaker. I kept ingestion synchronous for clarity; the scale path is queue plus bulk insert.
 
 ## What I Did Not Build
 
-I did not build real login/RBAC, a real payment processor, a full adjustment invoice engine, a distributed queue, production observability, or a warehouse pipeline. Those are the next steps after the core ledger behavior is correct.
+I did not build real login/RBAC, a real payment processor, a full adjustment invoice engine, a distributed queue, a production metrics stack, or a warehouse pipeline. Those are the next steps after the core ledger behavior is correct.
 
 ## Correctness Proof
 

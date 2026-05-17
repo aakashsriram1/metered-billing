@@ -30,6 +30,25 @@ from .serializers import (
 from .services import issue_credit, override_invoice_line_item
 
 
+def has_usage_anomaly(customer):
+    now = timezone.now()
+    last_24h_total = (
+        UsageWindow.objects.filter(customer=customer, window_start__gte=now - timedelta(hours=24))
+        .aggregate(total=Sum("total_units"))["total"]
+        or 0
+    )
+    previous_30d_total = (
+        UsageWindow.objects.filter(
+            customer=customer,
+            window_start__gte=now - timedelta(days=31),
+            window_start__lt=now - timedelta(hours=24),
+        ).aggregate(total=Sum("total_units"))["total"]
+        or 0
+    )
+    previous_daily_average = previous_30d_total / 30
+    return previous_daily_average > 0 and last_24h_total >= previous_daily_average * 10
+
+
 class CustomerScopedMixin:
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [permissions.IsAuthenticated]
@@ -182,6 +201,7 @@ class OpsCustomerListView(OpsScopedMixin, APIView):
                     "created_at": customer.created_at,
                     "current_month_usage_total": current_month_usage,
                     "invoice_count": customer.invoice_count,
+                    "anomaly": has_usage_anomaly(customer),
                 }
             )
         return Response({"results": results})
@@ -207,27 +227,9 @@ class OpsCustomerDetailView(OpsScopedMixin, APIView):
                 "recent_usage_windows": UsageWindowSerializer(recent_usage, many=True).data,
                 "invoices": InvoiceDetailSerializer(invoices, many=True).data,
                 "credits": CreditSerializer(credits, many=True).data,
-                "anomaly": self.has_usage_anomaly(customer),
+                "anomaly": has_usage_anomaly(customer),
             }
         )
-
-    def has_usage_anomaly(self, customer):
-        now = timezone.now()
-        last_24h_total = (
-            UsageWindow.objects.filter(customer=customer, window_start__gte=now - timedelta(hours=24))
-            .aggregate(total=Sum("total_units"))["total"]
-            or 0
-        )
-        previous_30d_total = (
-            UsageWindow.objects.filter(
-                customer=customer,
-                window_start__gte=now - timedelta(days=31),
-                window_start__lt=now - timedelta(hours=24),
-            ).aggregate(total=Sum("total_units"))["total"]
-            or 0
-        )
-        previous_daily_average = previous_30d_total / 30
-        return previous_daily_average > 0 and last_24h_total >= previous_daily_average * 10
 
 
 class OpsBillingInspectorView(OpsScopedMixin, APIView):
