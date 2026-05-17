@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { AlertCircle, CheckCircle2, FileText, KeyRound, RefreshCw } from "lucide-react";
+import { AlertCircle, CheckCircle2, FileText, KeyRound, RefreshCw, ShieldCheck } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -10,12 +10,21 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { fetchJson } from "./api";
-import type { Invoice, InvoiceDetail, UsageResponse, UsageWindow } from "./types";
+import { fetchJson, opsFetchJson } from "./api";
+import type {
+  Invoice,
+  InvoiceDetail,
+  OpsCustomerDetail,
+  OpsCustomerSummary,
+  UsageResponse,
+  UsageWindow,
+} from "./types";
 
 const API_KEY_STORAGE_KEY = "metered_billing_customer_api_key";
+const OPS_TOKEN_STORAGE_KEY = "metered_billing_ops_token";
 
 type LoadState = "idle" | "loading" | "loaded" | "error";
+type Tab = "customer" | "ops";
 
 function currentMonthRange() {
   const now = new Date();
@@ -75,6 +84,24 @@ function groupUsageByDay(windows: UsageWindow[]) {
 }
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>("customer");
+
+  return (
+    <main className="app-shell">
+      <nav className="top-tabs" aria-label="Dashboard sections">
+        <button className={activeTab === "customer" ? "tab active" : "tab"} onClick={() => setActiveTab("customer")}>
+          Customer Dashboard
+        </button>
+        <button className={activeTab === "ops" ? "tab active" : "tab"} onClick={() => setActiveTab("ops")}>
+          Ops Console
+        </button>
+      </nav>
+      {activeTab === "customer" ? <CustomerDashboard /> : <OpsConsole />}
+    </main>
+  );
+}
+
+function CustomerDashboard() {
   const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem(API_KEY_STORAGE_KEY) || "");
   const [apiKey, setApiKey] = useState(() => localStorage.getItem(API_KEY_STORAGE_KEY) || "");
   const [usage, setUsage] = useState<UsageWindow[]>([]);
@@ -170,33 +197,24 @@ export default function App() {
   const chartData = useMemo(() => groupUsageByDay(usage), [usage]);
 
   return (
-    <main className="app-shell">
+    <>
       <header className="page-header">
         <div>
           <h1>Customer Dashboard</h1>
           <p>API usage and invoices</p>
         </div>
-        <section className="key-panel" aria-label="API key settings">
-          <div className={apiKey ? "status connected" : "status missing"}>
-            {apiKey ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-            {apiKey ? "Connected" : "Missing API key"}
-          </div>
-          <div className="key-row">
-            <KeyRound size={18} />
-            <input
-              type="password"
-              value={apiKeyInput}
-              onChange={(event) => setApiKeyInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") saveApiKey();
-              }}
-              placeholder="Paste seeded sk_test key"
-              aria-label="Customer API key"
-            />
-            <button onClick={saveApiKey}>Save API key</button>
-            <button className="secondary" onClick={clearApiKey}>Clear</button>
-          </div>
-        </section>
+        <TokenPanel
+          icon={<KeyRound size={18} />}
+          token={apiKeyInput}
+          saved={Boolean(apiKey)}
+          connectedLabel="Connected"
+          missingLabel="Missing API key"
+          placeholder="Paste seeded sk_test key"
+          ariaLabel="Customer API key"
+          onChange={setApiKeyInput}
+          onSave={saveApiKey}
+          onClear={clearApiKey}
+        />
       </header>
 
       {!apiKey && (
@@ -228,140 +246,648 @@ export default function App() {
               </section>
 
               <section className="dashboard-grid">
-                <Panel title="Daily Usage">
-                  {chartData.length === 0 ? (
-                    <EmptyState title="No usage yet" message="No usage windows were found for the current period." compact />
-                  ) : (
-                    <div className="chart-wrap">
-                      <ResponsiveContainer width="100%" height={260}>
-                        <BarChart data={chartData}>
-                          <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                          <XAxis dataKey="day" tickLine={false} axisLine={false} />
-                          <YAxis tickLine={false} axisLine={false} width={70} />
-                          <Tooltip formatter={(value) => [Number(value).toLocaleString(), "units"]} />
-                          <Bar dataKey="units" fill="#2563eb" radius={[4, 4, 0, 0]} />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                  )}
-                </Panel>
-
-                <Panel title="Recent Usage Windows">
-                  {usage.length === 0 ? (
-                    <EmptyState title="No windows" message="Try ingesting events and running aggregate_usage." compact />
-                  ) : (
-                    <div className="table-scroll">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Window start</th>
-                            <th>API key</th>
-                            <th>Units</th>
-                            <th>Events</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {usage.slice(0, 12).map((window) => (
-                            <tr key={`${window.api_key_id}-${window.window_start}`}>
-                              <td>{formatDateTime(window.window_start)}</td>
-                              <td>{shortId(window.api_key_id)}</td>
-                              <td>{window.total_units.toLocaleString()}</td>
-                              <td>{window.event_count.toLocaleString()}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </Panel>
-
-                <Panel title="Invoices">
-                  {invoices.length === 0 ? (
-                    <EmptyState title="No invoices" message="No invoices are available for this customer yet." compact />
-                  ) : (
-                    <div className="table-scroll">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Period</th>
-                            <th>Status</th>
-                            <th>Total</th>
-                            <th>Issued</th>
-                            <th></th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {invoices.map((invoice) => (
-                            <tr key={invoice.id}>
-                              <td>{formatDate(invoice.period_start)} - {formatDate(invoice.period_end)}</td>
-                              <td><span className={`pill ${invoice.status}`}>{invoice.status}</span></td>
-                              <td>{money(invoice.total_cents)}</td>
-                              <td>{formatDate(invoice.issued_at)}</td>
-                              <td>
-                                <button className="link-button" onClick={() => loadInvoiceDetail(invoice.id)}>
-                                  View details
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </Panel>
-
-                <Panel title="Invoice Detail">
-                  {!selectedInvoiceId && (
-                    <EmptyState title="Select an invoice" message="Click View details to inspect invoice line items." compact />
-                  )}
-                  {detailState === "loading" && <PanelMessage message="Loading invoice detail..." />}
-                  {detailState === "error" && <ErrorState message={detailError} />}
-                  {detailState === "loaded" && invoiceDetail && (
-                    <div className="invoice-detail">
-                      <div className="detail-header">
-                        <div>
-                          <FileText size={20} />
-                          <strong>{formatDate(invoiceDetail.period_start)} - {formatDate(invoiceDetail.period_end)}</strong>
-                        </div>
-                        <span className={`pill ${invoiceDetail.status}`}>{invoiceDetail.status}</span>
-                      </div>
-                      <div className="table-scroll">
-                        <table>
-                          <thead>
-                            <tr>
-                              <th>Description</th>
-                              <th>Units</th>
-                              <th>Unit price</th>
-                              <th>Amount</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {invoiceDetail.line_items.map((line) => (
-                              <tr key={line.id}>
-                                <td>{line.description}</td>
-                                <td>{line.units.toLocaleString()}</td>
-                                <td>{unitPrice(line.unit_price_micros)}</td>
-                                <td>{money(line.amount_cents)}</td>
-                              </tr>
-                            ))}
-                            <tr className="total-row">
-                              <td>Total</td>
-                              <td></td>
-                              <td></td>
-                              <td>{money(invoiceDetail.total_cents)}</td>
-                            </tr>
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-                </Panel>
+                <UsageChartPanel chartData={chartData} />
+                <UsageWindowsPanel usage={usage} />
+                <InvoiceListPanel invoices={invoices} onSelect={loadInvoiceDetail} />
+                <InvoiceDetailPanel
+                  selectedInvoiceId={selectedInvoiceId}
+                  invoiceDetail={invoiceDetail}
+                  detailState={detailState}
+                  detailError={detailError}
+                />
               </section>
             </>
           )}
         </>
       )}
-    </main>
+    </>
+  );
+}
+
+function OpsConsole() {
+  const [opsTokenInput, setOpsTokenInput] = useState(() => localStorage.getItem(OPS_TOKEN_STORAGE_KEY) || "dev-ops-token");
+  const [opsToken, setOpsToken] = useState(() => localStorage.getItem(OPS_TOKEN_STORAGE_KEY) || "");
+  const [customers, setCustomers] = useState<OpsCustomerSummary[]>([]);
+  const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
+  const [customerDetail, setCustomerDetail] = useState<OpsCustomerDetail | null>(null);
+  const [listState, setListState] = useState<LoadState>("idle");
+  const [detailState, setDetailState] = useState<LoadState>("idle");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [creditForm, setCreditForm] = useState({
+    amount_cents: "500",
+    reason: "",
+    idempotency_key: "",
+    invoice_id: "",
+  });
+  const [overrideForm, setOverrideForm] = useState({
+    invoice_id: "",
+    line_item_id: "",
+    amount_cents: "",
+    reason: "",
+  });
+
+  async function loadCustomers(activeToken = opsToken) {
+    if (!activeToken) {
+      setListState("idle");
+      setCustomers([]);
+      return;
+    }
+    setListState("loading");
+    setError("");
+    try {
+      const response = await opsFetchJson<{ results: OpsCustomerSummary[] }>("/ops/customers", activeToken);
+      setCustomers(response.results);
+      setListState("loaded");
+    } catch (err) {
+      setListState("error");
+      setError(err instanceof Error ? err.message : "Unable to load customers.");
+    }
+  }
+
+  async function loadCustomerDetail(customerId: string, activeToken = opsToken) {
+    setSelectedCustomerId(customerId);
+    setDetailState("loading");
+    setError("");
+    try {
+      const detail = await opsFetchJson<OpsCustomerDetail>(`/ops/customers/${customerId}`, activeToken);
+      setCustomerDetail(detail);
+      setDetailState("loaded");
+    } catch (err) {
+      setCustomerDetail(null);
+      setDetailState("error");
+      setError(err instanceof Error ? err.message : "Unable to load customer detail.");
+    }
+  }
+
+  function saveOpsToken() {
+    const trimmed = opsTokenInput.trim();
+    if (!trimmed) return;
+    localStorage.setItem(OPS_TOKEN_STORAGE_KEY, trimmed);
+    setOpsToken(trimmed);
+    loadCustomers(trimmed);
+  }
+
+  function clearOpsToken() {
+    localStorage.removeItem(OPS_TOKEN_STORAGE_KEY);
+    setOpsToken("");
+    setOpsTokenInput("");
+    setCustomers([]);
+    setCustomerDetail(null);
+    setSelectedCustomerId(null);
+    setListState("idle");
+    setDetailState("idle");
+    setMessage("");
+    setError("");
+  }
+
+  async function submitCredit() {
+    if (!customerDetail || !opsToken) return;
+    const amount = Number(creditForm.amount_cents);
+    if (!creditForm.reason.trim()) {
+      setError("Credit reason is required.");
+      return;
+    }
+    if (!creditForm.idempotency_key.trim()) {
+      setError("Credit idempotency key is required.");
+      return;
+    }
+    if (!Number.isInteger(amount) || amount <= 0) {
+      setError("Credit amount must be a positive integer in cents.");
+      return;
+    }
+    if (!window.confirm("This creates a billing credit and audit log. Continue?")) return;
+
+    setMessage("");
+    setError("");
+    try {
+      await opsFetchJson(`/ops/customers/${customerDetail.id}/credits`, opsToken, {
+        method: "POST",
+        body: {
+          amount_cents: amount,
+          reason: creditForm.reason.trim(),
+          idempotency_key: creditForm.idempotency_key.trim(),
+          ...(creditForm.invoice_id.trim() ? { invoice_id: creditForm.invoice_id.trim() } : {}),
+        },
+      });
+      setMessage("Credit created successfully.");
+      setCreditForm({ amount_cents: "500", reason: "", idempotency_key: "", invoice_id: "" });
+      await loadCustomerDetail(customerDetail.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to create credit.");
+    }
+  }
+
+  async function submitOverride() {
+    if (!customerDetail || !opsToken) return;
+    const amount = Number(overrideForm.amount_cents);
+    if (!overrideForm.reason.trim()) {
+      setError("Override reason is required.");
+      return;
+    }
+    if (!overrideForm.invoice_id.trim() || !overrideForm.line_item_id.trim()) {
+      setError("Invoice ID and line item ID are required.");
+      return;
+    }
+    if (!Number.isInteger(amount)) {
+      setError("Override amount must be an integer in cents.");
+      return;
+    }
+    if (!window.confirm("This changes a billed invoice line item and writes an audit log. Continue?")) return;
+
+    setMessage("");
+    setError("");
+    try {
+      await opsFetchJson(
+        `/ops/invoices/${overrideForm.invoice_id.trim()}/line-items/${overrideForm.line_item_id.trim()}`,
+        opsToken,
+        {
+          method: "PATCH",
+          body: {
+            amount_cents: amount,
+            reason: overrideForm.reason.trim(),
+          },
+        },
+      );
+      setMessage("Line item override applied successfully.");
+      setOverrideForm({ invoice_id: "", line_item_id: "", amount_cents: "", reason: "" });
+      await loadCustomerDetail(customerDetail.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to override line item.");
+    }
+  }
+
+  useEffect(() => {
+    if (opsToken) {
+      loadCustomers(opsToken);
+    }
+  }, []);
+
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <h1>Ops Console</h1>
+          <p>Billing operations and customer support</p>
+        </div>
+        <TokenPanel
+          icon={<ShieldCheck size={18} />}
+          token={opsTokenInput}
+          saved={Boolean(opsToken)}
+          connectedLabel="Ops token saved"
+          missingLabel="Missing ops token"
+          placeholder="dev-ops-token"
+          ariaLabel="Ops token"
+          onChange={setOpsTokenInput}
+          onSave={saveOpsToken}
+          onClear={clearOpsToken}
+        />
+      </header>
+
+      {!opsToken && (
+        <EmptyState title="Save an ops token" message="Use dev-ops-token for the local demo environment." />
+      )}
+
+      {opsToken && (
+        <>
+          <div className="toolbar">
+            <button className="secondary" onClick={() => loadCustomers()} disabled={listState === "loading"}>
+              <RefreshCw size={16} />
+              Refresh customers
+            </button>
+          </div>
+
+          {message && <SuccessState message={message} />}
+          {error && <ErrorState message={error} />}
+          {listState === "loading" && <PanelMessage message="Loading customers..." />}
+
+          <section className="ops-grid">
+            <Panel title="Customers">
+              {listState === "error" && <ErrorState message={error} />}
+              {listState === "loaded" && customers.length === 0 && (
+                <EmptyState title="No customers" message="Run seed_demo_data to create demo customers." compact />
+              )}
+              {customers.length > 0 && (
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Customer</th>
+                        <th>Email</th>
+                        <th>Usage</th>
+                        <th>Invoices</th>
+                        <th>Anomaly</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {customers.map((customer) => (
+                        <tr key={customer.id} className={selectedCustomerId === customer.id ? "selected-row" : ""}>
+                          <td>{customer.name}</td>
+                          <td>{customer.email}</td>
+                          <td>{customer.current_month_usage_total.toLocaleString()}</td>
+                          <td>{customer.invoice_count}</td>
+                          <td>{customer.anomaly ? <span className="pill danger">anomaly</span> : "-"}</td>
+                          <td>
+                            <button className="link-button" onClick={() => loadCustomerDetail(customer.id)}>
+                              View
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Panel>
+
+            <Panel title="Customer Detail">
+              {!selectedCustomerId && (
+                <EmptyState title="Select a customer" message="Choose a customer to inspect usage, invoices, and credits." compact />
+              )}
+              {detailState === "loading" && <PanelMessage message="Loading customer detail..." />}
+              {detailState === "error" && <ErrorState message={error} />}
+              {detailState === "loaded" && customerDetail && (
+                <div className="ops-detail">
+                  <div className="detail-header">
+                    <div>
+                      <strong>{customerDetail.name}</strong>
+                      <span className="muted-text">{customerDetail.email}</span>
+                    </div>
+                    {customerDetail.anomaly ? <span className="pill danger">anomaly</span> : <span className="pill paid">normal</span>}
+                  </div>
+
+                  <h3>Recent usage windows</h3>
+                  <MiniUsageTable usage={customerDetail.recent_usage_windows} />
+
+                  <h3>Invoices</h3>
+                  <InvoiceOpsTable invoices={customerDetail.invoices} />
+
+                  <h3>Credits</h3>
+                  <CreditsTable credits={customerDetail.credits} />
+                </div>
+              )}
+            </Panel>
+
+            {customerDetail && (
+              <>
+                <Panel title="Issue Credit">
+                  <WarningText message="This creates a billing credit and audit log." />
+                  <div className="form-grid">
+                    <label>
+                      Amount cents
+                      <input
+                        type="number"
+                        min="1"
+                        value={creditForm.amount_cents}
+                        onChange={(event) => setCreditForm({ ...creditForm, amount_cents: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Idempotency key
+                      <input
+                        value={creditForm.idempotency_key}
+                        onChange={(event) => setCreditForm({ ...creditForm, idempotency_key: event.target.value })}
+                        placeholder="credit_123"
+                      />
+                    </label>
+                    <label>
+                      Optional invoice ID
+                      <input
+                        value={creditForm.invoice_id}
+                        onChange={(event) => setCreditForm({ ...creditForm, invoice_id: event.target.value })}
+                        placeholder="invoice uuid"
+                      />
+                    </label>
+                    <label className="full">
+                      Reason
+                      <textarea
+                        value={creditForm.reason}
+                        onChange={(event) => setCreditForm({ ...creditForm, reason: event.target.value })}
+                        placeholder="Required reason"
+                      />
+                    </label>
+                  </div>
+                  <button className="danger-button" onClick={submitCredit}>Issue credit</button>
+                </Panel>
+
+                <Panel title="Override Line Item">
+                  <WarningText message="This changes a billed invoice line item and writes an audit log." />
+                  <div className="form-grid">
+                    <label>
+                      Invoice ID
+                      <input
+                        value={overrideForm.invoice_id}
+                        onChange={(event) => setOverrideForm({ ...overrideForm, invoice_id: event.target.value })}
+                        placeholder="invoice uuid"
+                      />
+                    </label>
+                    <label>
+                      Line item ID
+                      <input
+                        value={overrideForm.line_item_id}
+                        onChange={(event) => setOverrideForm({ ...overrideForm, line_item_id: event.target.value })}
+                        placeholder="line item uuid"
+                      />
+                    </label>
+                    <label>
+                      New amount cents
+                      <input
+                        type="number"
+                        value={overrideForm.amount_cents}
+                        onChange={(event) => setOverrideForm({ ...overrideForm, amount_cents: event.target.value })}
+                        placeholder="2500"
+                      />
+                    </label>
+                    <label className="full">
+                      Reason
+                      <textarea
+                        value={overrideForm.reason}
+                        onChange={(event) => setOverrideForm({ ...overrideForm, reason: event.target.value })}
+                        placeholder="Required reason"
+                      />
+                    </label>
+                  </div>
+                  <button className="danger-button" onClick={submitOverride}>Override line item</button>
+                </Panel>
+              </>
+            )}
+          </section>
+        </>
+      )}
+    </>
+  );
+}
+
+function TokenPanel({
+  icon,
+  token,
+  saved,
+  connectedLabel,
+  missingLabel,
+  placeholder,
+  ariaLabel,
+  onChange,
+  onSave,
+  onClear,
+}: {
+  icon: ReactNode;
+  token: string;
+  saved: boolean;
+  connectedLabel: string;
+  missingLabel: string;
+  placeholder: string;
+  ariaLabel: string;
+  onChange: (value: string) => void;
+  onSave: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <section className="key-panel" aria-label={ariaLabel}>
+      <div className={saved ? "status connected" : "status missing"}>
+        {saved ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+        {saved ? connectedLabel : missingLabel}
+      </div>
+      <div className="key-row">
+        {icon}
+        <input
+          type="password"
+          value={token}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") onSave();
+          }}
+          placeholder={placeholder}
+          aria-label={ariaLabel}
+        />
+        <button onClick={onSave}>Save</button>
+        <button className="secondary" onClick={onClear}>Clear</button>
+      </div>
+    </section>
+  );
+}
+
+function UsageChartPanel({ chartData }: { chartData: { day: string; units: number }[] }) {
+  return (
+    <Panel title="Daily Usage">
+      {chartData.length === 0 ? (
+        <EmptyState title="No usage yet" message="No usage windows were found for the current period." compact />
+      ) : (
+        <div className="chart-wrap">
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={chartData}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="day" tickLine={false} axisLine={false} />
+              <YAxis tickLine={false} axisLine={false} width={70} />
+              <Tooltip formatter={(value) => [Number(value).toLocaleString(), "units"]} />
+              <Bar dataKey="units" fill="#2563eb" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function UsageWindowsPanel({ usage }: { usage: UsageWindow[] }) {
+  return (
+    <Panel title="Recent Usage Windows">
+      {usage.length === 0 ? (
+        <EmptyState title="No windows" message="Try ingesting events and running aggregate_usage." compact />
+      ) : (
+        <MiniUsageTable usage={usage.slice(0, 12)} />
+      )}
+    </Panel>
+  );
+}
+
+function MiniUsageTable({ usage }: { usage: UsageWindow[] }) {
+  if (usage.length === 0) {
+    return <EmptyState title="No usage windows" message="No recent usage windows were returned." compact />;
+  }
+  return (
+    <div className="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Window start</th>
+            <th>API key</th>
+            <th>Units</th>
+            <th>Events</th>
+          </tr>
+        </thead>
+        <tbody>
+          {usage.map((window) => (
+            <tr key={`${window.api_key_id}-${window.window_start}`}>
+              <td>{formatDateTime(window.window_start)}</td>
+              <td>{shortId(window.api_key_id)}</td>
+              <td>{window.total_units.toLocaleString()}</td>
+              <td>{window.event_count.toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function InvoiceListPanel({ invoices, onSelect }: { invoices: Invoice[]; onSelect: (id: string) => void }) {
+  return (
+    <Panel title="Invoices">
+      {invoices.length === 0 ? (
+        <EmptyState title="No invoices" message="No invoices are available for this customer yet." compact />
+      ) : (
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Period</th>
+                <th>Status</th>
+                <th>Total</th>
+                <th>Issued</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {invoices.map((invoice) => (
+                <tr key={invoice.id}>
+                  <td>{formatDate(invoice.period_start)} - {formatDate(invoice.period_end)}</td>
+                  <td><span className={`pill ${invoice.status}`}>{invoice.status}</span></td>
+                  <td>{money(invoice.total_cents)}</td>
+                  <td>{formatDate(invoice.issued_at)}</td>
+                  <td>
+                    <button className="link-button" onClick={() => onSelect(invoice.id)}>
+                      View details
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function InvoiceOpsTable({ invoices }: { invoices: Invoice[] }) {
+  if (invoices.length === 0) {
+    return <EmptyState title="No invoices" message="This customer has no invoices yet." compact />;
+  }
+  return (
+    <div className="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Invoice ID</th>
+            <th>Period</th>
+            <th>Status</th>
+            <th>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {invoices.map((invoice) => (
+            <tr key={invoice.id}>
+              <td><code>{invoice.id}</code></td>
+              <td>{formatDate(invoice.period_start)} - {formatDate(invoice.period_end)}</td>
+              <td><span className={`pill ${invoice.status}`}>{invoice.status}</span></td>
+              <td>{money(invoice.total_cents)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CreditsTable({ credits }: { credits: OpsCustomerDetail["credits"] }) {
+  if (credits.length === 0) {
+    return <EmptyState title="No credits" message="No credits have been issued for this customer." compact />;
+  }
+  return (
+    <div className="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Amount</th>
+            <th>Reason</th>
+            <th>Invoice</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {credits.map((credit) => (
+            <tr key={credit.id}>
+              <td>{money(credit.amount_cents)}</td>
+              <td>{credit.reason}</td>
+              <td>{credit.invoice_id ? <code>{credit.invoice_id}</code> : "Unapplied"}</td>
+              <td>{formatDate(credit.created_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function InvoiceDetailPanel({
+  selectedInvoiceId,
+  invoiceDetail,
+  detailState,
+  detailError,
+}: {
+  selectedInvoiceId: string | null;
+  invoiceDetail: InvoiceDetail | null;
+  detailState: LoadState;
+  detailError: string;
+}) {
+  return (
+    <Panel title="Invoice Detail">
+      {!selectedInvoiceId && (
+        <EmptyState title="Select an invoice" message="Click View details to inspect invoice line items." compact />
+      )}
+      {detailState === "loading" && <PanelMessage message="Loading invoice detail..." />}
+      {detailState === "error" && <ErrorState message={detailError} />}
+      {detailState === "loaded" && invoiceDetail && (
+        <div className="invoice-detail">
+          <div className="detail-header">
+            <div>
+              <FileText size={20} />
+              <strong>{formatDate(invoiceDetail.period_start)} - {formatDate(invoiceDetail.period_end)}</strong>
+            </div>
+            <span className={`pill ${invoiceDetail.status}`}>{invoiceDetail.status}</span>
+          </div>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Description</th>
+                  <th>Units</th>
+                  <th>Unit price</th>
+                  <th>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {invoiceDetail.line_items.map((line) => (
+                  <tr key={line.id}>
+                    <td>{line.description}</td>
+                    <td>{line.units.toLocaleString()}</td>
+                    <td>{unitPrice(line.unit_price_micros)}</td>
+                    <td>{money(line.amount_cents)}</td>
+                  </tr>
+                ))}
+                <tr className="total-row">
+                  <td>Total</td>
+                  <td></td>
+                  <td></td>
+                  <td>{money(invoiceDetail.total_cents)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </Panel>
   );
 }
 
@@ -391,6 +917,24 @@ function ErrorState({ message }: { message: string }) {
   return (
     <div className="error-state">
       <AlertCircle size={18} />
+      <span>{message}</span>
+    </div>
+  );
+}
+
+function SuccessState({ message }: { message: string }) {
+  return (
+    <div className="success-state">
+      <CheckCircle2 size={18} />
+      <span>{message}</span>
+    </div>
+  );
+}
+
+function WarningText({ message }: { message: string }) {
+  return (
+    <div className="warning-text">
+      <AlertCircle size={16} />
       <span>{message}</span>
     </div>
   );

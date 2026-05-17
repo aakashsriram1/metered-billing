@@ -37,3 +37,34 @@ export type InvoiceLineItem = {
 export type InvoiceDetail = Invoice & {
   line_items: InvoiceLineItem[];
 };
+
+export type Credit = {
+  id: string;
+  invoice_id: string | null;
+  amount_cents: number;
+  reason: string;
+  created_by: string;
+  idempotency_key: string;
+  created_at: string;
+};
+
+export type OpsCustomerSummary = {
+  id: string;
+  name: string;
+  email: string;
+  created_at: string;
+  current_month_usage_total: number;
+  invoice_count: number;
+  anomaly?: boolean;
+};
+
+export type OpsCustomerDetail = {
+  id: string;
+  name: string;
+  email: string;
+  created_at: string;
+  recent_usage_windows: UsageWindow[];
+  invoices: Invoice[];
+  credits: Credit[];
+  anomaly: boolean;
+};

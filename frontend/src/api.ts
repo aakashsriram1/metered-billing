@@ -1,12 +1,20 @@
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL as string | undefined;
 const API_BASE_URL = import.meta.env.DEV ? "/api" : configuredBaseUrl || "http://localhost:8000";
 
-export async function fetchJson<T>(path: string, apiKey: string): Promise<T> {
+type RequestOptions = {
+  method?: string;
+  body?: unknown;
+};
+
+async function requestJson<T>(path: string, headers: Record<string, string>, options: RequestOptions = {}): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: options.method || "GET",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
       Accept: "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...headers,
     },
+    body: options.body ? JSON.stringify(options.body) : undefined,
   });
 
   if (!response.ok) {
@@ -22,4 +30,12 @@ export async function fetchJson<T>(path: string, apiKey: string): Promise<T> {
   }
 
   return response.json() as Promise<T>;
+}
+
+export async function fetchJson<T>(path: string, apiKey: string): Promise<T> {
+  return requestJson<T>(path, { Authorization: `Bearer ${apiKey}` });
+}
+
+export async function opsFetchJson<T>(path: string, opsToken: string, options: RequestOptions = {}): Promise<T> {
+  return requestJson<T>(path, { "X-Ops-Token": opsToken }, options);
 }
