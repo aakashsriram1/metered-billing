@@ -1,3 +1,4 @@
+# These are local demo values only. Copy .env.example to .env for production.
 services:
   db:
     image: postgres:16
