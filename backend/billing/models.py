@@ -12,6 +12,13 @@ def hash_api_key(raw_key: str) -> str:
 
 class Customer(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    price_plan = models.ForeignKey(
+        "PricePlan",
+        related_name="customers",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+    )
     name = models.CharField(max_length=255)
     email = models.EmailField(unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -23,6 +30,20 @@ class Customer(models.Model):
     @property
     def is_authenticated(self):
         return True
+
+
+class PricePlan(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    free_units = models.PositiveIntegerField(default=10_000)
+    tier_1_limit = models.PositiveIntegerField(default=100_000)
+    tier_1_price_micros = models.PositiveIntegerField(default=1_000)
+    tier_2_price_micros = models.PositiveIntegerField(default=500)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
 
 
 class ApiKey(models.Model):
@@ -94,3 +115,57 @@ class UsageWindow(models.Model):
 
     def __str__(self):
         return f"{self.customer} {self.window_start} ({self.total_units} units)"
+
+
+class Invoice(models.Model):
+    STATUS_DRAFT = "draft"
+    STATUS_ISSUED = "issued"
+    STATUS_PAID = "paid"
+    STATUS_VOID = "void"
+
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_ISSUED, "Issued"),
+        (STATUS_PAID, "Paid"),
+        (STATUS_VOID, "Void"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    customer = models.ForeignKey(Customer, related_name="invoices", on_delete=models.CASCADE)
+    period_start = models.DateTimeField()
+    period_end = models.DateTimeField()
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    total_cents = models.IntegerField(default=0)
+    issued_at = models.DateTimeField(null=True, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["customer", "period_start", "period_end"],
+                name="unique_invoice_customer_period",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["customer", "period_start"]),
+        ]
+
+    def __str__(self):
+        return f"{self.customer} invoice {self.period_start:%Y-%m-%d}"
+
+
+class InvoiceLineItem(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    invoice = models.ForeignKey(Invoice, related_name="line_items", on_delete=models.CASCADE)
+    description = models.CharField(max_length=255)
+    units = models.IntegerField()
+    unit_price_micros = models.IntegerField()
+    amount_cents = models.IntegerField()
+    metadata = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.description}: {self.amount_cents} cents"

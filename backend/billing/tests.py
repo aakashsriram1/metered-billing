@@ -4,7 +4,8 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from .management.commands.aggregate_usage import Command as AggregateUsageCommand
-from .models import ApiKey, Customer, UsageEvent, UsageWindow
+from .models import ApiKey, Customer, Invoice, PricePlan, UsageEvent, UsageWindow
+from .services import calculate_tiered_amount_cents, generate_invoice_for_customer
 
 
 class EventIngestionTests(APITestCase):
@@ -267,3 +268,104 @@ class UsageEndpointTests(APITestCase):
         self.assertEqual(response.data["page_size"], 1)
         self.assertEqual(response.data["total"], 3)
         self.assertEqual(len(response.data["results"]), 1)
+
+
+class BillingTests(APITestCase):
+    def setUp(self):
+        self.price_plan = PricePlan.objects.create(name="Default")
+        self.customer = Customer.objects.create(
+            name="Alpha Billing",
+            email="alpha-billing@example.com",
+            price_plan=self.price_plan,
+        )
+        self.api_key, self.raw_key = ApiKey.create_key(self.customer, "Alpha billing key")
+        self.other_customer = Customer.objects.create(
+            name="Beta Billing",
+            email="beta-billing@example.com",
+            price_plan=self.price_plan,
+        )
+        self.other_api_key, _ = ApiKey.create_key(self.other_customer, "Beta billing key")
+        self.period_start = datetime(2026, 5, 1, 0, 0, tzinfo=datetime_timezone.utc)
+        self.period_end = datetime(2026, 6, 1, 0, 0, tzinfo=datetime_timezone.utc)
+
+    def auth(self):
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.raw_key}")
+
+    def create_window(self, customer=None, api_key=None, total_units=0):
+        return UsageWindow.objects.create(
+            customer=customer or self.customer,
+            api_key=api_key or self.api_key,
+            window_start=datetime(2026, 5, 16, 18, 0, tzinfo=datetime_timezone.utc),
+            window_end=datetime(2026, 5, 16, 19, 0, tzinfo=datetime_timezone.utc),
+            total_units=total_units,
+            event_count=1,
+        )
+
+    def test_pricing_tiers_are_correct(self):
+        self.assertEqual(calculate_tiered_amount_cents(0, self.price_plan), 0)
+        self.assertEqual(calculate_tiered_amount_cents(10_000, self.price_plan), 0)
+        self.assertEqual(calculate_tiered_amount_cents(10_001, self.price_plan), 0)
+        self.assertEqual(calculate_tiered_amount_cents(100_000, self.price_plan), 9_000)
+        self.assertEqual(calculate_tiered_amount_cents(150_000, self.price_plan), 11_500)
+
+    def test_invoice_generation_creates_invoice(self):
+        self.create_window(total_units=20_000)
+
+        invoice = generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
+
+        self.assertEqual(invoice.customer, self.customer)
+        self.assertEqual(invoice.status, Invoice.STATUS_ISSUED)
+        self.assertIsNotNone(invoice.issued_at)
+
+    def test_invoice_generation_creates_correct_line_items(self):
+        self.create_window(total_units=150_000)
+
+        invoice = generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
+
+        line_items = list(invoice.line_items.order_by("unit_price_micros"))
+        self.assertEqual(len(line_items), 3)
+        self.assertEqual(invoice.total_cents, 11_500)
+        self.assertEqual(sum(item.amount_cents for item in line_items), 11_500)
+
+    def test_running_invoice_generation_twice_does_not_double_bill(self):
+        self.create_window(total_units=150_000)
+
+        first = generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
+        second = generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(Invoice.objects.count(), 1)
+        self.assertEqual(second.line_items.count(), 3)
+        self.assertEqual(second.total_cents, 11_500)
+
+    def test_customer_can_list_own_invoices(self):
+        self.create_window(total_units=20_000)
+        generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
+        self.auth()
+
+        response = self.client.get("/v1/invoices")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["total_cents"], 1_000)
+
+    def test_customer_can_retrieve_own_invoice_detail(self):
+        self.create_window(total_units=20_000)
+        invoice = generate_invoice_for_customer(self.customer, self.period_start, self.period_end)
+        self.auth()
+
+        response = self.client.get(f"/v1/invoices/{invoice.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["id"], str(invoice.id))
+        self.assertIn("line_items", response.data)
+        self.assertGreater(len(response.data["line_items"]), 0)
+
+    def test_customer_cannot_retrieve_another_customers_invoice(self):
+        self.create_window(customer=self.other_customer, api_key=self.other_api_key, total_units=20_000)
+        invoice = generate_invoice_for_customer(self.other_customer, self.period_start, self.period_end)
+        self.auth()
+
+        response = self.client.get(f"/v1/invoices/{invoice.id}")
+
+        self.assertEqual(response.status_code, 404)

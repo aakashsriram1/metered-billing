@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import UsageWindow
+from .models import Invoice, InvoiceLineItem, UsageWindow
 
 
 class UsageEventInputSerializer(serializers.Serializer):
@@ -16,3 +16,32 @@ class UsageWindowSerializer(serializers.ModelSerializer):
     class Meta:
         model = UsageWindow
         fields = ("window_start", "window_end", "api_key_id", "total_units", "event_count")
+
+
+class InvoiceLineItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InvoiceLineItem
+        fields = ("id", "description", "units", "unit_price_micros", "amount_cents", "metadata")
+
+
+class InvoiceListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Invoice
+        fields = (
+            "id",
+            "period_start",
+            "period_end",
+            "status",
+            "total_cents",
+            "issued_at",
+            "paid_at",
+            "created_at",
+            "updated_at",
+        )
+
+
+class InvoiceDetailSerializer(InvoiceListSerializer):
+    line_items = InvoiceLineItemSerializer(many=True, read_only=True)
+
+    class Meta(InvoiceListSerializer.Meta):
+        fields = InvoiceListSerializer.Meta.fields + ("line_items",)

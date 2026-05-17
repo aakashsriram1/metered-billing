@@ -7,8 +7,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .authentication import ApiKeyAuthentication
-from .models import ApiKey, UsageEvent, UsageWindow
-from .serializers import UsageEventInputSerializer, UsageWindowSerializer
+from .models import ApiKey, Invoice, UsageEvent, UsageWindow
+from .serializers import InvoiceDetailSerializer, InvoiceListSerializer, UsageEventInputSerializer, UsageWindowSerializer
 
 
 class EventIngestionView(APIView):
@@ -120,3 +120,28 @@ class UsageView(APIView):
         if maximum is not None:
             parsed = min(parsed, maximum)
         return parsed
+
+
+class InvoiceListView(APIView):
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        invoices = Invoice.objects.filter(customer=request.customer).order_by("-period_start")
+        return Response({"results": InvoiceListSerializer(invoices, many=True).data})
+
+
+class InvoiceDetailView(APIView):
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, invoice_id):
+        try:
+            invoice = Invoice.objects.prefetch_related("line_items").get(
+                id=invoice_id,
+                customer=request.customer,
+            )
+        except Invoice.DoesNotExist:
+            raise exceptions.NotFound("Invoice not found")
+
+        return Response(InvoiceDetailSerializer(invoice).data)

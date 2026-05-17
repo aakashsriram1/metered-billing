@@ -1,0 +1,96 @@
+from django.db import transaction
+from django.db.models import Sum
+from django.utils import timezone
+
+from .models import Customer, Invoice, InvoiceLineItem, PricePlan, UsageWindow
+
+
+def micros_to_cents(units: int, price_micros: int) -> int:
+    return (units * price_micros) // 10_000
+
+
+def tiered_line_items(total_units: int, price_plan: PricePlan):
+    free_units = min(total_units, price_plan.free_units)
+    tier_1_units = min(max(total_units - price_plan.free_units, 0), price_plan.tier_1_limit - price_plan.free_units)
+    tier_2_units = max(total_units - price_plan.tier_1_limit, 0)
+
+    items = [
+        {
+            "description": f"First {price_plan.free_units:,} units free",
+            "units": free_units,
+            "unit_price_micros": 0,
+            "amount_cents": 0,
+            "metadata": {"tier": "free"},
+        }
+    ]
+
+    if tier_1_units:
+        items.append(
+            {
+                "description": f"Next {price_plan.tier_1_limit - price_plan.free_units:,} units",
+                "units": tier_1_units,
+                "unit_price_micros": price_plan.tier_1_price_micros,
+                "amount_cents": micros_to_cents(tier_1_units, price_plan.tier_1_price_micros),
+                "metadata": {"tier": "tier_1"},
+            }
+        )
+
+    if tier_2_units:
+        items.append(
+            {
+                "description": f"Units beyond {price_plan.tier_1_limit:,}",
+                "units": tier_2_units,
+                "unit_price_micros": price_plan.tier_2_price_micros,
+                "amount_cents": micros_to_cents(tier_2_units, price_plan.tier_2_price_micros),
+                "metadata": {"tier": "tier_2"},
+            }
+        )
+
+    return items
+
+
+def calculate_tiered_amount_cents(total_units: int, price_plan: PricePlan) -> int:
+    return sum(item["amount_cents"] for item in tiered_line_items(total_units, price_plan))
+
+
+def default_price_plan():
+    plan, _ = PricePlan.objects.get_or_create(name="Default tiered plan")
+    return plan
+
+
+def generate_invoice_for_customer(customer: Customer, period_start, period_end):
+    price_plan = customer.price_plan or default_price_plan()
+
+    total_units = (
+        UsageWindow.objects.filter(
+            customer=customer,
+            window_start__gte=period_start,
+            window_start__lt=period_end,
+        ).aggregate(total=Sum("total_units"))["total"]
+        or 0
+    )
+
+    with transaction.atomic():
+        invoice, _ = Invoice.objects.get_or_create(
+            customer=customer,
+            period_start=period_start,
+            period_end=period_end,
+        )
+
+        InvoiceLineItem.objects.filter(invoice=invoice).delete()
+        for item in tiered_line_items(total_units, price_plan):
+            InvoiceLineItem.objects.create(invoice=invoice, **item)
+
+        invoice.total_cents = sum(line.amount_cents for line in invoice.line_items.all())
+        if invoice.status == Invoice.STATUS_DRAFT:
+            invoice.status = Invoice.STATUS_ISSUED
+            invoice.issued_at = timezone.now()
+        invoice.save(update_fields=["total_cents", "status", "issued_at", "updated_at"])
+        return invoice
+
+
+def generate_invoices(period_start, period_end):
+    invoices = []
+    for customer in Customer.objects.all().select_related("price_plan"):
+        invoices.append(generate_invoice_for_customer(customer, period_start, period_end))
+    return invoices
