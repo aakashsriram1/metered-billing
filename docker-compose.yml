@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: metered_billing
+      POSTGRES_USER: metered_user
+      POSTGRES_PASSWORD: metered_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    environment:
+      DJANGO_SECRET_KEY: dev-secret-key
+      DJANGO_DEBUG: "true"
+      DB_NAME: metered_billing
+      DB_USER: metered_user
+      DB_PASSWORD: metered_password
+      DB_HOST: db
+      DB_PORT: "5432"
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:
