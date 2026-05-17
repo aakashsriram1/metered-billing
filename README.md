@@ -4,12 +4,11 @@ A local metering and billing system for a SaaS API. It ingests idempotent usage 
 
 ## Stack
 
-- Backend: Django, Django REST Framework
+- Backend: Django, REST 
 - Database: Postgres
 - Frontend: React, Vite, TypeScript
 - Charts/UI helpers: Recharts, lucide-react
 - Local runtime: Docker Compose
-- Background jobs: Django management command worker with DB-backed `JobRun` locks
 
 ## Local Setup
 
@@ -140,9 +139,9 @@ See `.env.example` for the full list:
 - `API_KEY_HASH_SECRET`
 - `OPS_TOKEN`
 
-The values in `docker-compose.yml` are local demo secrets only. Do not use them in production.
+The values in `docker-compose.yml` are local demo secrets only
 
-## More Docs
+## More Info
 
 - `DEMO.md`: step-by-step evaluator walkthrough
 - `DESIGN.md`: architecture, correctness, scaling, and trade-offs
