@@ -20,11 +20,17 @@ async function requestJson<T>(path: string, headers: Record<string, string>, opt
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {
-      const body = await response.json();
-      message = body.detail || JSON.stringify(body);
-    } catch {
       const text = await response.text();
-      if (text) message = text;
+      if (text) {
+        try {
+          const body = JSON.parse(text);
+          message = body.detail || JSON.stringify(body);
+        } catch {
+          message = text;
+        }
+      }
+    } catch {
+      // Keep the status fallback if the browser cannot expose the body.
     }
     throw new Error(message);
   }
