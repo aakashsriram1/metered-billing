@@ -120,7 +120,7 @@ export default function App() {
 
 function CustomerDashboard() {
   const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem(API_KEY_STORAGE_KEY) || "");
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem(API_KEY_STORAGE_KEY) || "");
+  const [apiKey, setApiKey] = useState("");
   const [usage, setUsage] = useState<UsageWindow[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null);
@@ -195,12 +195,6 @@ function CustomerDashboard() {
     setError("");
     setDetailError("");
   }
-
-  useEffect(() => {
-    if (apiKey) {
-      loadDashboard(apiKey);
-    }
-  }, []);
 
   const usageTotals = useMemo(
     () => ({
