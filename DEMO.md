@@ -24,10 +24,19 @@ Open the frontend:
 http://localhost:5173
 ```
 
-Backend API runs at:
+The Django backend API runs at:
 
 ```text
 http://localhost:8000
+```
+
+The backend does not serve a homepage at `/`, so `http://localhost:8000/` may show Django's 404 page. That is expected. Use:
+
+```text
+http://localhost:8000/admin/
+http://localhost:8000/v1/usage
+http://localhost:8000/v1/invoices
+http://localhost:8000/ops/customers
 ```
 
 The seeded `sk_test_...` keys are printed once and may change after each reset. Use the latest key printed by the seed command.

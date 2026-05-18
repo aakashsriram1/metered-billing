@@ -62,6 +62,8 @@ Ops Console:
 
 ## Backend API Summary
 
+The Django backend runs at `http://localhost:8000`, but the root path `/` is not a UI page. A 404 at `http://localhost:8000/` is expected. Use the frontend at `http://localhost:5173`, Django admin at `http://localhost:8000/admin/`, or one of the API routes below.
+
 Customer-facing endpoints require:
 
 ```text
@@ -70,10 +72,10 @@ Authorization: Bearer <raw_api_key>
 
 Endpoints:
 
-- `POST /v1/events`
-- `GET /v1/usage`
-- `GET /v1/invoices`
-- `GET /v1/invoices/{id}`
+- `POST http://localhost:8000/v1/events`
+- `GET http://localhost:8000/v1/usage`
+- `GET http://localhost:8000/v1/invoices`
+- `GET http://localhost:8000/v1/invoices/{id}`
 
 Ops endpoints require:
 
@@ -83,15 +85,15 @@ X-Ops-Token: dev-ops-token
 
 Endpoints:
 
-- `GET /ops/customers`
-- `GET /ops/customers/{id}`
-- `GET /ops/customers/{id}/billing-inspector`
-- `POST /ops/customers/{id}/credits`
-- `PATCH /ops/invoices/{invoice_id}/line-items/{line_item_id}`
+- `GET http://localhost:8000/ops/customers`
+- `GET http://localhost:8000/ops/customers/{id}`
+- `GET http://localhost:8000/ops/customers/{id}/billing-inspector`
+- `POST http://localhost:8000/ops/customers/{id}/credits`
+- `PATCH http://localhost:8000/ops/invoices/{invoice_id}/line-items/{line_item_id}`
 
 Webhook endpoint:
 
-- `POST /webhooks/payments`
+- `POST http://localhost:8000/webhooks/payments`
 
 ## Background Jobs
 
