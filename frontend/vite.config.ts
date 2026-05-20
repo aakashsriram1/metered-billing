@@ -7,6 +7,15 @@ const proxyTarget = process.env.VITE_PROXY_TARGET || "http://localhost:8000";
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        customer: "customer.html",
+        ops: "ops.html",
+      },
+    },
+  },
   server: {
     proxy: {
       "/api": {

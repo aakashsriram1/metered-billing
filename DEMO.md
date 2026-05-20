@@ -18,10 +18,17 @@ docker compose exec backend python manage.py seed_demo_data --reset
 
 The seed command prints demo customers and raw `sk_test_...` API keys. Copy one key.
 
-Open the frontend:
+Open the frontend launcher:
 
 ```text
 http://localhost:5173
+```
+
+The customer and ops frontends also have direct URLs:
+
+```text
+http://localhost:5173/customer.html
+http://localhost:5173/ops.html
 ```
 
 The Django backend API runs at:
@@ -43,7 +50,7 @@ The seeded `sk_test_...` keys are printed once and may change after each reset. 
 
 ## 2. Customer Dashboard
 
-1. Open `Customer Dashboard`.
+1. Open `http://localhost:5173/customer.html`.
 2. Paste one printed `sk_test_...` key.
 3. Click `Save`.
 4. Confirm the page shows:
@@ -56,7 +63,7 @@ The seeded `sk_test_...` keys are printed once and may change after each reset. 
 
 ## 3. Ops Console
 
-1. Open `Ops Console`.
+1. Open `http://localhost:5173/ops.html`.
 2. Enter ops token:
 
 ```text

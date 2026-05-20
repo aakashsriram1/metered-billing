@@ -8,9 +8,9 @@ export type UsageWindow = {
 
 export type UsageResponse = {
   results: UsageWindow[];
-  page: number;
   page_size: number;
-  total: number;
+  next_cursor: string | null;
+  has_more: boolean;
 };
 
 export type Invoice = {

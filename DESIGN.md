@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project is a local metering and billing system for a SaaS API. The product emits usage events, the backend stores them as raw facts, a worker rolls them into hourly usage windows, and monthly invoice generation prices those windows against a tiered plan. The repo runs with Docker Compose: Postgres, a Django/DRF API, a React/Vite frontend, and a lightweight worker.
+This project is a local metering and billing system for a SaaS API. The product emits usage events, the backend stores them as raw facts, a worker rolls them into hourly usage windows, and monthly invoice generation prices those windows against a tiered plan. The repo runs with Docker Compose: Postgres, a Django/DRF API, separate React/Vite customer and ops frontends, and a lightweight worker.
 
 The design favors correctness and debuggability over premature distributed infrastructure. Billing accuracy is contractual, so raw usage events remain the source of truth. Derived state is recomputable where possible, and money-moving changes go through explicit ops actions with audit logs.
 
@@ -14,7 +14,7 @@ The design favors correctness and debuggability over premature distributed infra
 
 The important constraints are in the database, not just comments. `UsageEvent.request_id` is unique. `UsageWindow(customer, api_key, window_start)` is protected by `unique_usage_window_customer_api_key_hour`. `Invoice(customer, period_start, period_end)` is protected by `unique_invoice_customer_period`. `Credit(customer, idempotency_key)` is protected by `unique_credit_customer_idempotency_key`. `WebhookEvent.provider_event_id` and `JobRun.lock_key` are also unique.
 
-Indexes match the queries the app runs: usage events by customer/date and API key/date, windows by customer/window and API key/window, invoices by customer/period, credits by customer/created time, plus unique lookups for webhooks and jobs. Money is stored as integer cents (`amount_cents`) and integer micros (`unit_price_micros`), never floats.
+Indexes match the queries the app runs: usage events by customer/date and API key/date, windows by customer/window and API key/window, invoices by customer/period, credits by customer/created time, plus unique lookups for webhooks and jobs. `GET /v1/usage` uses keyset pagination over `UsageWindow(window_start, id)` rather than OFFSET pagination or a per-request total count. Money is stored as integer cents (`amount_cents`) and integer micros (`unit_price_micros`), never floats.
 
 At 10x, I would partition `UsageEvent` monthly by timestamp and add partition-local timestamp indexes or BRIN indexes. At 100x, I would keep Postgres as the billing ledger but move raw event ingest behind a queue and bulk insert path, then copy closed-period raw events to S3, ClickHouse, or a warehouse for long-term analytics. If one Postgres writer became the bottleneck, I would hash partition by customer.
 
@@ -30,7 +30,7 @@ Credits use `Credit(customer, idempotency_key)` as the dedupe key. Invoice-linke
 
 Payment webhooks verify an HMAC over the raw request body and store the provider event id. If the same delivery arrives three times, the first delivery is processed and the later deliveries return as replays. If the invoice is already paid, the handler records no second financial effect.
 
-Job overlap is handled by `JobRun.start`, which locks the row with `select_for_update`. If another run has the same lock key and is still running, the command exits cleanly.
+Job overlap is handled by `JobRun.start`, which locks the row with `select_for_update`. If another run has the same lock key and is still running, the command exits cleanly. Audit logs are append-only in Python and at the database layer: Postgres triggers reject raw SQL UPDATE and DELETE on `billing_auditlog`.
 
 ## Aggregation Pipeline
 
@@ -62,7 +62,7 @@ API keys are generated once and stored as HMAC-SHA256 using `API_KEY_HASH_SECRET
 
 Ops endpoints require `X-Ops-Token`. This is intentionally simple demo auth; production would use real internal identity, roles, and per-action authorization. The webhook endpoint verifies an HMAC signature over `request.body`, not parsed JSON, so the exact delivered bytes are signed.
 
-`AuditLog` rows are append-only in normal code paths. The model rejects updates and deletes, and Django admin exposes the table as read-only.
+`AuditLog` rows are append-only in normal code paths and at the SQL layer. The model rejects updates and deletes, Django admin exposes the table as read-only, and Postgres triggers reject direct UPDATE/DELETE attempts by the app role.
 
 ## Ops Workflows And Audit Trail
 
@@ -122,6 +122,7 @@ I did not build real login/RBAC, a real payment processor, a full adjustment inv
 |---|---|---|---|
 | duplicate `request_id` | unique DB constraint, catch `IntegrityError` | `UsageEvent.request_id`, `EventIngestionView` | `test_duplicate_request_id_does_not_create_two_rows` |
 | concurrent duplicate event | same unique constraint under concurrent API calls | DB + `EventIngestionView` transaction | `test_concurrent_duplicate_request_id_creates_one_event` |
+| usage pagination at scale | keyset cursor, no OFFSET or COUNT | `UsageView` | `test_usage_pagination_does_not_run_count_query` |
 | aggregator rerun | recompute from raw events, `update_or_create` window | `aggregate_usage` | `test_running_aggregation_twice_does_not_double_count` |
 | invoice generation rerun | unique customer/period invoice, rebuild usage lines | `generate_invoice_for_customer` | `test_running_invoice_generation_twice_does_not_double_bill` |
 | paid invoice regeneration | skip paid invoices | `generate_invoice_for_customer` | `test_paid_invoice_is_not_changed_by_generate_invoices` |
@@ -130,4 +131,4 @@ I did not build real login/RBAC, a real payment processor, a full adjustment inv
 | webhook replay | unique provider event ID | `WebhookEvent.provider_event_id` | `test_same_provider_event_id_replay_does_not_double_apply` |
 | cross-tenant invoice guess | customer-scoped queryset | `CustomerScopedMixin`, invoice views | `test_customer_cannot_retrieve_another_customers_invoice` |
 | API key leakage | HMAC hash only, prefix stored | `hash_api_key`, `ApiKey.create_key` | `test_api_key_hash_is_hmac_not_raw_or_plain_sha256` |
-| audit tampering | append-only model, read-only admin | `AuditLog.save/delete`, `AuditLogAdmin` | audit action tests plus implementation guard |
+| audit tampering | append-only model, read-only admin, DB triggers | `AuditLog.save/delete`, `AuditLogAdmin`, `billing_auditlog` triggers | `test_raw_sql_update_on_audit_log_is_blocked`, `test_raw_sql_delete_on_audit_log_is_blocked` |

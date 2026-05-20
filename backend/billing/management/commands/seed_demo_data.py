@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from django.core.management import call_command
 from django.core.management.base import BaseCommand
+from django.db import connection
 from django.utils import timezone
 
 from billing.models import (
@@ -74,7 +75,8 @@ class Command(BaseCommand):
 
     def reset_data(self):
         WebhookEvent.objects.all().delete()
-        AuditLog.objects.all().delete()
+        with connection.cursor() as cursor:
+            cursor.execute(f'TRUNCATE TABLE "{AuditLog._meta.db_table}" RESTART IDENTITY CASCADE')
         Credit.objects.all().delete()
         InvoiceLineItem.objects.all().delete()
         Invoice.objects.all().delete()

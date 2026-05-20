@@ -41,11 +41,16 @@ The seed command prints demo customers and raw `sk_test_...` API keys. Copy one 
 
 ## Frontend
 
-Open:
+Open the launcher:
 
 ```text
 http://localhost:5173
 ```
+
+The two frontends are separate Vite entry points:
+
+- Customer Dashboard: `http://localhost:5173/customer.html`
+- Ops Console: `http://localhost:5173/ops.html`
 
 Customer Dashboard:
 

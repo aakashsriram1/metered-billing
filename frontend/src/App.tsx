@@ -27,7 +27,6 @@ const API_KEY_STORAGE_KEY = "metered_billing_customer_api_key";
 const OPS_TOKEN_STORAGE_KEY = "metered_billing_ops_token";
 
 type LoadState = "idle" | "loading" | "loaded" | "error";
-type Tab = "customer" | "ops";
 
 function currentMonthRange() {
   const now = new Date();
@@ -101,19 +100,33 @@ function groupUsageByDay(windows: UsageWindow[]) {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<Tab>("customer");
-
   return (
     <main className="app-shell">
-      <nav className="top-tabs" aria-label="Dashboard sections">
-        <button className={activeTab === "customer" ? "tab active" : "tab"} onClick={() => setActiveTab("customer")}>
-          Customer Dashboard
-        </button>
-        <button className={activeTab === "ops" ? "tab active" : "tab"} onClick={() => setActiveTab("ops")}>
-          Ops Console
-        </button>
-      </nav>
-      {activeTab === "customer" ? <CustomerDashboard /> : <OpsConsole />}
+      <section className="landing-panel">
+        <p className="eyebrow">Metered API Billing</p>
+        <h1>Choose a frontend</h1>
+        <p>Customer usage and internal billing operations are exposed as separate local frontends.</p>
+        <div className="landing-actions">
+          <a className="primary-link" href="/customer.html">Customer Dashboard</a>
+          <a className="secondary-link" href="/ops.html">Ops Console</a>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+export function CustomerDashboardApp() {
+  return (
+    <main className="app-shell">
+      <CustomerDashboard />
+    </main>
+  );
+}
+
+export function OpsConsoleApp() {
+  return (
+    <main className="app-shell">
+      <OpsConsole />
     </main>
   );
 }

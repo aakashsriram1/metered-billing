@@ -79,6 +79,51 @@ button.danger-button {
   padding: 28px;
 }
 
+.landing-panel {
+  max-width: 680px;
+  margin-top: 64px;
+  padding: 28px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: white;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+
+.eyebrow {
+  margin-bottom: 8px;
+  color: #2563eb;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.landing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 22px;
+}
+
+.primary-link,
+.secondary-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  text-decoration: none;
+}
+
+.primary-link {
+  background: #2563eb;
+  color: white;
+}
+
+.secondary-link {
+  border: 1px solid #cbd5e1;
+  color: #1e293b;
+}
+
 .top-tabs {
   display: inline-flex;
   gap: 6px;

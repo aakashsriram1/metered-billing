@@ -7,8 +7,10 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.core.management import call_command
+from django.db import DatabaseError, connection
 from django.db.models import Sum
-from django.test import override_settings
+from django.test import TransactionTestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
@@ -225,7 +227,9 @@ class UsageEndpointTests(APITestCase):
         response = self.client.get("/v1/usage")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["total"], 1)
+        self.assertNotIn("total", response.data)
+        self.assertIsNone(response.data["next_cursor"])
+        self.assertFalse(response.data["has_more"])
         self.assertEqual(response.data["results"][0]["total_units"], 123)
         self.assertEqual(response.data["results"][0]["event_count"], 4)
 
@@ -236,7 +240,7 @@ class UsageEndpointTests(APITestCase):
         response = self.client.get("/v1/usage")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["total"], 0)
+        self.assertNotIn("total", response.data)
         self.assertEqual(response.data["results"], [])
 
     def test_api_key_id_filter_works_for_own_api_key(self):
@@ -247,7 +251,7 @@ class UsageEndpointTests(APITestCase):
         response = self.client.get(f"/v1/usage?api_key_id={self.second_api_key.id}")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["total"], 1)
+        self.assertNotIn("total", response.data)
         self.assertEqual(response.data["results"][0]["api_key_id"], str(self.second_api_key.id))
         self.assertEqual(response.data["results"][0]["total_units"], 20)
 
@@ -258,7 +262,7 @@ class UsageEndpointTests(APITestCase):
         response = self.client.get(f"/v1/usage?api_key_id={self.other_api_key.id}")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["total"], 0)
+        self.assertNotIn("total", response.data)
         self.assertEqual(response.data["results"], [])
 
     def test_date_range_filter_works(self):
@@ -271,10 +275,10 @@ class UsageEndpointTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["total"], 1)
+        self.assertNotIn("total", response.data)
         self.assertEqual(response.data["results"][0]["total_units"], 10)
 
-    def test_pagination_works(self):
+    def test_cursor_pagination_works(self):
         for hour in range(3):
             self.create_window(
                 window_start=datetime(2026, 5, 16, hour, 0, tzinfo=datetime_timezone.utc),
@@ -282,13 +286,32 @@ class UsageEndpointTests(APITestCase):
             )
         self.auth()
 
-        response = self.client.get("/v1/usage?page=2&page_size=1")
+        first_page = self.client.get("/v1/usage?page_size=1")
+
+        self.assertEqual(first_page.status_code, 200)
+        self.assertEqual(first_page.data["page_size"], 1)
+        self.assertTrue(first_page.data["has_more"])
+        self.assertIsNotNone(first_page.data["next_cursor"])
+        self.assertEqual(first_page.data["results"][0]["total_units"], 3)
+
+        second_page = self.client.get(f"/v1/usage?page_size=1&cursor={first_page.data['next_cursor']}")
+
+        self.assertEqual(second_page.status_code, 200)
+        self.assertEqual(second_page.data["results"][0]["total_units"], 2)
+
+    def test_usage_pagination_does_not_run_count_query(self):
+        for hour in range(3):
+            self.create_window(
+                window_start=datetime(2026, 5, 16, hour, 0, tzinfo=datetime_timezone.utc),
+                total_units=hour + 1,
+            )
+        self.auth()
+
+        with CaptureQueriesContext(connection) as captured:
+            response = self.client.get("/v1/usage?page_size=1")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["page"], 2)
-        self.assertEqual(response.data["page_size"], 1)
-        self.assertEqual(response.data["total"], 3)
-        self.assertEqual(len(response.data["results"]), 1)
+        self.assertFalse(any("COUNT(" in query["sql"].upper() for query in captured.captured_queries))
 
 
 class BillingTests(APITestCase):
@@ -806,6 +829,41 @@ class RunWorkerTests(APITestCase):
             ).status,
             JobRun.STATUS_SUCCEEDED,
         )
+
+
+class AuditLogDatabaseImmutabilityTests(TransactionTestCase):
+    def create_audit_log(self):
+        return AuditLog.objects.create(
+            actor="ops@example.com",
+            action="credit.create",
+            object_type="Credit",
+            object_id="credit_123",
+            before_json={},
+            after_json={"amount_cents": 500},
+            reason="Test audit immutability",
+        )
+
+    def test_raw_sql_update_on_audit_log_is_blocked(self):
+        audit = self.create_audit_log()
+
+        with self.assertRaises(DatabaseError):
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE billing_auditlog SET reason = %s WHERE id = %s",
+                    ["mutated", str(audit.id)],
+                )
+
+        audit.refresh_from_db()
+        self.assertEqual(audit.reason, "Test audit immutability")
+
+    def test_raw_sql_delete_on_audit_log_is_blocked(self):
+        audit = self.create_audit_log()
+
+        with self.assertRaises(DatabaseError):
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM billing_auditlog WHERE id = %s", [str(audit.id)])
+
+        self.assertTrue(AuditLog.objects.filter(id=audit.id).exists())
 
 
 @override_settings(PAYMENT_WEBHOOK_SECRET="test-payment-secret")

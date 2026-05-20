@@ -1,7 +1,10 @@
+import base64
+import binascii
 import hashlib
 import hmac
 import json
 from datetime import datetime, time, timedelta
+from uuid import UUID
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -99,8 +102,8 @@ class EventIngestionView(CustomerScopedMixin, APIView):
 class UsageView(CustomerScopedMixin, APIView):
     def get(self, request):
         start, end = self.date_range(request)
-        page = self.positive_int(request.query_params.get("page"), default=1, maximum=None)
         page_size = self.positive_int(request.query_params.get("page_size"), default=50, maximum=200)
+        cursor = self.decode_cursor(request.query_params.get("cursor"))
 
         queryset = self.scope_to_customer(UsageWindow.objects.all()).filter(
             window_start__gte=start,
@@ -114,17 +117,24 @@ class UsageView(CustomerScopedMixin, APIView):
             else:
                 queryset = queryset.filter(api_key_id=api_key_id)
 
-        queryset = queryset.order_by("-window_start")
-        total = queryset.count()
-        offset = (page - 1) * page_size
-        results = queryset[offset : offset + page_size]
+        if cursor:
+            cursor_start, cursor_id = cursor
+            queryset = queryset.filter(
+                Q(window_start__lt=cursor_start) | Q(window_start=cursor_start, id__lt=cursor_id)
+            )
+
+        queryset = queryset.order_by("-window_start", "-id")
+        page_rows = list(queryset[: page_size + 1])
+        has_more = len(page_rows) > page_size
+        results = page_rows[:page_size]
+        next_cursor = self.encode_cursor(results[-1]) if has_more and results else None
 
         return Response(
             {
                 "results": UsageWindowSerializer(results, many=True).data,
-                "page": page,
                 "page_size": page_size,
-                "total": total,
+                "next_cursor": next_cursor,
+                "has_more": has_more,
             }
         )
 
@@ -164,6 +174,28 @@ class UsageView(CustomerScopedMixin, APIView):
         if maximum is not None:
             parsed = min(parsed, maximum)
         return parsed
+
+    def encode_cursor(self, window):
+        payload = json.dumps(
+            {
+                "window_start": window.window_start.isoformat(),
+                "id": str(window.id),
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return base64.urlsafe_b64encode(payload).decode("utf-8").rstrip("=")
+
+    def decode_cursor(self, value):
+        if not value:
+            return None
+        try:
+            padded = value + "=" * (-len(value) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8"))
+            window_start = self.parse_timestamp(payload["window_start"])
+            cursor_id = UUID(payload["id"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, binascii.Error):
+            raise exceptions.ValidationError({"cursor": "Invalid cursor."})
+        return window_start, cursor_id
 
 
 class InvoiceListView(CustomerScopedMixin, APIView):
